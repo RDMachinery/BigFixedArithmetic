@@ -6,6 +6,7 @@ import java.math.BigInteger;
  * Implements fixed-point arithmetic using BigInteger to prevent integer overflow.
  * All arithmetic operations (add, subtract, multiply, divide) are constructed
  * using only addition, subtraction, and bit shifting on BigInteger instances.
+ * @author Mario Gianota (mariogianota@protonmail.com)
  */
 public class BigFixedArithmetic {
 
