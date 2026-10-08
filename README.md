@@ -83,3 +83,7 @@ public class Main {
 ## License
 
 This project is open-source and available under the [MIT License](LICENSE).
+
+## Further Reading
+
+https://medium.com/@mariogianota/why-you-should-abandon-floating-point-libraries-and-use-this-method-instead-for-certain-types-of-5591be108131
