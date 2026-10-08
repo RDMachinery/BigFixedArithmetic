@@ -1,55 +1,64 @@
-*BigFixedArithmetic
+# BigFixedArithmetic
 
-BigFixedArithmetic is an arbitrary-precision Java fixed-point arithmetic library designed to eliminate integer overflow and floating-point representation errors. By backed scaled values with Java's BigInteger and executing calculations purely through soft-emulated bit shifts, addition, and subtraction, it provides a deterministic framework for applications where CPU floating-point rounding drift must be avoided.
+`BigFixedArithmetic` is an arbitrary-precision Java fixed-point arithmetic library designed to eliminate integer overflow and floating-point representation errors. By backed scaled values with Java's `BigInteger` and executing calculations purely through soft-emulated bit shifts, addition, and subtraction, it provides a deterministic framework for applications where CPU floating-point rounding drift must be avoided.
 
-*What It Is For
+---
 
-Standard floating-point types (float, double) introduce representation errors and platform-dependent rounding behaviour, making them unsuitable for exact financial accounting or lockstep deterministic simulations. While primitive fixed-point implementations prevent floating-point drift, fixed 64-bit integer backings risk silent overflow.
-BigFixedArithmetic bridges this gap by offering:
+## What It Is For
 
-Arbitrary Precision: Scaled fractional precision can be configured to any target decimal depth.
+Standard floating-point types (`float`, `double`) introduce representation errors and platform-dependent rounding behaviour, making them unsuitable for exact financial accounting or lockstep deterministic simulations. While primitive fixed-point implementations prevent floating-point drift, fixed 64-bit integer backings risk silent overflow.
 
-Overflow Immunity: Uses BigInteger as the underlying register, eliminating bit-width caps.
+`BigFixedArithmetic` bridges this gap by offering:
+* **Arbitrary Precision:** Scaled fractional precision can be configured to any target decimal depth.
+* **Overflow Immunity:** Uses `BigInteger` as the underlying register, eliminating bit-width caps.
+* **Hardware Independence:** Performs arithmetic without relying on native multiplication (`*`), division (`/`), or modulo (`%`) operators on the `BigInteger` values.
 
-Hardware Independence: Performs arithmetic without relying on native multiplication (*), division (/), or modulo (%) operators on the BigInteger values.   
+---
 
-*How It Works
+## How It Works
 
-The class converts real numbers into scaled integers according to a fixed precision factor (SCALE=10 PRECISION ):   
-Internal Value=Real Value×SCALE
-All standard operations are emulated using fundamental bitwise and additive logic:   
+The class converts real numbers into scaled integers according to a fixed precision factor ($SCALE = 10^{PRECISION}$):
 
-Addition & Subtraction: Executed via direct BigInteger addition and subtraction.
+$$\text{Internal Value} = \text{Real Value} \times SCALE$$
 
-Multiplication: Implements the Russian Peasant (binary shift-and-add) algorithm to multiply intermediate integer and fractional components.   
+All standard operations are emulated using fundamental bitwise and additive logic:
+* **Addition & Subtraction:** Executed via direct `BigInteger` addition and subtraction.
+* **Multiplication:** Implements the **Russian Peasant** (binary shift-and-add) algorithm to multiply intermediate integer and fractional components.
+* **Division:** Implements binary shift-and-subtract long division to compute quotient and fractional remainders without relying on native CPU division loops.
 
-Division: Implements binary shift-and-subtract long division to compute quotient and fractional remainders without relying on native CPU division loops.   
+---
 
-*Requirements & Compilation
+## Requirements & Compilation
 
-*Prerequisites
-Java Development Kit (JDK) 8 or higher.
+### Prerequisites
+* Java Development Kit (JDK) 8 or higher.
 
-*Compilation
-Save the code in a file named BigFixedArithmetic.java and compile it using javac:
+### Compilation
+Save the code in a file named `BigFixedArithmetic.java` and compile it using `javac`:
 
+```bash
 javac BigFixedArithmetic.java
+```
 
-*Basic Usage
+---
 
-**Running the Included Demo
+## Basic Usage
 
-You can run the compiled class directly to execute the included main demonstration:
-Bash
+### Running the Included Demo
+You can run the compiled class directly to execute the included `main` demonstration:
+
+```bash
 java BigFixedArithmetic
+```
 
-*Code Example
+### Code Example
 
-Below is a quick example showing how to initialise numbers from strings or long integers and perform basic arithmetic:
+Below is a quick example showing how to initialize numbers from strings or long integers and perform basic arithmetic:
+
 ```java
 public class Main {
     public static void main(String[] args) {
-        // Initialise values from Strings or long integers
+        // Initialize values from Strings or long integers
         BigFixedArithmetic a = BigFixedArithmetic.of("123456789.987654321");
         BigFixedArithmetic b = BigFixedArithmetic.of("0.333333333333333333");
         BigFixedArithmetic c = BigFixedArithmetic.of(100);
@@ -69,6 +78,8 @@ public class Main {
 }
 ```
 
-*License
+---
 
-This project is open-source and available under the MIT License.
+## License
+
+This project is open-source and available under the [MIT License](LICENSE).
