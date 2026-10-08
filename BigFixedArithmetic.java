@@ -1,197 +1,76 @@
 import java.math.BigInteger;
+import java.util.Scanner;
 
 /**
  * BigFixedArithmetic
  * 
- * Implements fixed-point arithmetic using BigInteger to prevent integer overflow.
- * All arithmetic operations (add, subtract, multiply, divide) are constructed
- * using only addition, subtraction, and bit shifting on BigInteger instances.
- * @author Mario Gianota (mariogianota@protonmail.com)
+ * Demonstrates exact, soft-emulated integer arithmetic using BigInteger.
+ * Implements addition, subtraction, Russian Peasant multiplication, and a
+ * streaming division engine that outputs digits sequentially without truncation.
  */
 public class BigFixedArithmetic {
 
-    // Number of decimal places to preserve (can be set arbitrarily high)
-    public static final int PRECISION = 18;
-
-    private static final BigInteger SCALE;
     private static final BigInteger ZERO = BigInteger.ZERO;
-    private static final BigInteger ONE = BigInteger.ONE;
-    private static final BigInteger TWO = BigInteger.valueOf(2);
-    private static final BigInteger TEN = BigInteger.valueOf(10);
+    private static final BigInteger ONE  = BigInteger.ONE;
+    private static final BigInteger TEN  = BigInteger.valueOf(10);
 
-    static {
-        // Compute SCALE = 10^PRECISION using addition loops
-        BigInteger s = ONE;
-        for (int i = 0; i < PRECISION; i++) {
-            BigInteger tenS = ZERO;
-            for (int j = 0; j < 10; j++) {
-                tenS = tenS.add(s);
-            }
-            s = tenS;
-        }
-        SCALE = s;
-    }
+    // ── Addition & Subtraction ───────────────────────────────────────────────
 
-    private final BigInteger regA; // Internal scaled value: realValue = regA / SCALE
-
-    // ── Constructors & Factories ──────────────────────────────────────────────
-
-    public BigFixedArithmetic(long integerValue) {
-        this.regA = scaleUp(BigInteger.valueOf(integerValue));
-    }
-
-    private BigFixedArithmetic(BigInteger scaledValue, boolean alreadyScaled) {
-        this.regA = scaledValue;
-    }
-
-    public static BigFixedArithmetic of(long value) {
-        return new BigFixedArithmetic(value);
-    }
-
-    public static BigFixedArithmetic of(String decimal) {
-        if (decimal == null || decimal.isEmpty()) {
-            throw new IllegalArgumentException("Input string must not be empty");
-        }
-
-        int i = 0;
-        BigInteger signum = ONE;
-        if (decimal.charAt(0) == '-') {
-            signum = ONE.negate();
-            i++;
-        } else if (decimal.charAt(0) == '+') {
-            i++;
-        }
-
-        BigInteger intPart = ZERO;
-        BigInteger fracPart = ZERO;
-        long fracDigits = 0;
-        boolean seenDot = false;
-
-        while (i < decimal.length()) {
-            char c = decimal.charAt(i);
-            if (c == '.') {
-                if (seenDot) throw new IllegalArgumentException("Multiple decimal points");
-                seenDot = true;
-            } else if (c >= '0' && c <= '9') {
-                BigInteger digit = BigInteger.valueOf(c - '0');
-                if (!seenDot) {
-                    intPart = russianPeasant(intPart, TEN).add(digit);
-                } else {
-                    if (fracDigits < PRECISION) {
-                        fracPart = russianPeasant(fracPart, TEN).add(digit);
-                        fracDigits++;
-                    }
-                }
-            } else {
-                throw new IllegalArgumentException("Invalid character: " + c);
-            }
-            i++;
-        }
-
-        BigInteger scaled = russianPeasant(intPart, SCALE);
-
-        if (fracDigits > 0) {
-            BigInteger tenPow = ONE;
-            for (long k = 0; k < fracDigits; k++) {
-                tenPow = russianPeasant(tenPow, TEN);
-            }
-            BigInteger fracScaled = russianPeasant(fracPart, SCALE);
-            BigInteger fracContribution = longDivide(fracScaled, tenPow);
-            scaled = scaled.add(fracContribution);
-        }
-
-        return new BigFixedArithmetic(scaled.multiply(signum), true);
-    }
-
-    // ── Arithmetic Operations ─────────────────────────────────────────────────
-
-    /** Addition: regA + other.regA */
-    public BigFixedArithmetic add(BigFixedArithmetic other) {
-        return new BigFixedArithmetic(this.regA.add(other.regA), true);
-    }
-
-    /** Subtraction: regA - other.regA */
-    public BigFixedArithmetic subtract(BigFixedArithmetic other) {
-        return new BigFixedArithmetic(this.regA.subtract(other.regA), true);
+    /**
+     * Adds two BigInteger operands: a + b
+     */
+    public static BigInteger add(BigInteger a, BigInteger b) {
+        return a.add(b);
     }
 
     /**
-     * Multiplication using Russian Peasant (binary shift-and-add) algorithm.
+     * Subtracts two BigInteger operands: a - b
      */
-    public BigFixedArithmetic multiply(BigFixedArithmetic other) {
-        BigInteger sign = ONE;
-        BigInteger regT = this.regA;
-        if (regT.compareTo(ZERO) < 0) { regT = regT.negate(); sign = sign.negate(); }
-        BigInteger regU = other.regA;
-        if (regU.compareTo(ZERO) < 0) { regU = regU.negate(); sign = sign.negate(); }
-
-        BigInteger T_int = longDivide(regT, SCALE);
-        BigInteger T_frac = regT.subtract(russianPeasant(T_int, SCALE));
-
-        BigInteger U_int = longDivide(regU, SCALE);
-        BigInteger U_frac = regU.subtract(russianPeasant(U_int, SCALE));
-
-        BigInteger term1 = russianPeasant(russianPeasant(T_int, U_int), SCALE);
-        BigInteger term2 = russianPeasant(T_int, U_frac);
-        BigInteger term3 = russianPeasant(T_frac, U_int);
-        BigInteger term4 = longDivide(russianPeasant(T_frac, U_frac), SCALE);
-
-        BigInteger result = term1.add(term2).add(term3).add(term4);
-        if (sign.compareTo(ZERO) < 0) result = result.negate();
-
-        return new BigFixedArithmetic(result, true);
+    public static BigInteger subtract(BigInteger a, BigInteger b) {
+        return a.subtract(b);
     }
+
+    // ── Multiplication (Russian Peasant Algorithm) ───────────────────────────
 
     /**
-     * Division using long division via repeated subtraction and bit shifts.
+     * Multiplies two BigInteger values using the Russian Peasant (binary shift-and-add) algorithm.
+     * Computes a * b using only bit tests, bit shifts, and addition.
      */
-    public BigFixedArithmetic divide(BigFixedArithmetic other) {
-        if (other.regA.equals(ZERO)) {
-            throw new ArithmeticException("Division by zero");
+    public static BigInteger multiply(BigInteger a, BigInteger b) {
+        if (a.equals(ZERO) || b.equals(ZERO)) {
+            return ZERO;
         }
 
-        BigInteger sign = ONE;
-        BigInteger regT = this.regA;
-        if (regT.compareTo(ZERO) < 0) { regT = regT.negate(); sign = sign.negate(); }
-        BigInteger regU = other.regA;
-        if (regU.compareTo(ZERO) < 0) { regU = regU.negate(); sign = sign.negate(); }
+        // Determine sign of the result
+        boolean isNegative = (a.signum() < 0) ^ (b.signum() < 0);
 
-        BigInteger qInt = longDivide(regT, regU);
-        BigInteger rem = regT.subtract(russianPeasant(qInt, regU));
-
-        BigInteger remScaled = russianPeasant(rem, SCALE);
-        BigInteger qFrac = longDivide(remScaled, regU);
-
-        BigInteger result = russianPeasant(qInt, SCALE).add(qFrac);
-        if (sign.compareTo(ZERO) < 0) result = result.negate();
-
-        return new BigFixedArithmetic(result, true);
-    }
-
-    // ── Helper Algorithms ─────────────────────────────────────────────────────
-
-    private static BigInteger scaleUp(BigInteger n) {
-        return russianPeasant(n.abs(), SCALE).multiply(BigInteger.valueOf(n.signum()));
-    }
-
-    /** Russian-peasant (binary) multiplication using addition and bit shifts */
-    private static BigInteger russianPeasant(BigInteger a, BigInteger b) {
+        BigInteger ta = a.abs();
+        BigInteger tb = b.abs();
         BigInteger result = ZERO;
-        BigInteger ta = a;
-        BigInteger tb = b;
+
         while (tb.compareTo(ZERO) > 0) {
+            // If the current bit of b is 1, add ta to accumulated result
             if (tb.testBit(0)) {
                 result = result.add(ta);
             }
+            // Double ta (shift left 1) and halve tb (shift right 1)
             ta = ta.add(ta);
             tb = tb.shiftRight(1);
         }
-        return result;
+
+        return isNegative ? result.negate() : result;
     }
 
-    /** Division via shift-and-subtract binary long division */
-    private static BigInteger longDivide(BigInteger dividend, BigInteger divisor) {
-        if (divisor.equals(ZERO)) throw new ArithmeticException("Division by zero");
+    // ── Division & Helpers ───────────────────────────────────────────────────
+
+    /**
+     * Division via shift-and-subtract binary long division.
+     * Computes dividend / divisor without hardware division operators.
+     */
+    public static BigInteger longDivide(BigInteger dividend, BigInteger divisor) {
+        if (divisor.equals(ZERO)) {
+            throw new ArithmeticException("Division by zero");
+        }
 
         BigInteger quotient = ZERO;
         BigInteger rem = dividend;
@@ -212,45 +91,91 @@ public class BigFixedArithmetic {
             shifted = shifted.shiftRight(1);
             bit = bit.shiftRight(1);
         }
+
         return quotient;
     }
 
-    @Override
-    public String toString() {
-        BigInteger abs = regA.abs();
-        BigInteger ip = longDivide(abs, SCALE);
-        BigInteger frac = abs.subtract(russianPeasant(ip, SCALE));
-
-        StringBuilder fracStr = new StringBuilder(frac.toString());
-        while (fracStr.length() < PRECISION) {
-            fracStr.insert(0, "0");
+    /**
+     * Divides {@code dividend} by {@code divisor} and continuously outputs decimal digits.
+     * 
+     * @param dividend numerator
+     * @param divisor denominator
+     * @param maxDecimalPlaces number of fractional digits to print, or -1 for unlimited streaming
+     */
+    public static void streamDivide(BigInteger dividend, BigInteger divisor, long maxDecimalPlaces) {
+        if (divisor.equals(ZERO)) {
+            throw new ArithmeticException("Division by zero");
         }
-        
-        // Trim trailing zeros
-        int end = fracStr.length();
-        while (end > 0 && fracStr.charAt(end - 1) == '0') {
-            end--;
-        }
-        String trimmedFrac = end == 0 ? "0" : fracStr.substring(0, end);
 
-        String sign = regA.compareTo(ZERO) < 0 ? "-" : "";
-        return sign + ip.toString() + "." + trimmedFrac;
+        boolean isNegative = (dividend.signum() < 0) ^ (divisor.signum() < 0);
+        BigInteger rem = dividend.abs();
+        BigInteger den = divisor.abs();
+
+        if (isNegative && !rem.equals(ZERO)) {
+            System.out.print("-");
+        }
+
+        // 1. Integer Part via Binary Long Division
+        BigInteger integerPart = longDivide(rem, den);
+        System.out.print(integerPart);
+
+        // Update remainder: rem = rem - (integerPart * den)
+        rem = rem.subtract(multiply(integerPart, den));
+
+        if (rem.equals(ZERO) || maxDecimalPlaces == 0) {
+            System.out.println();
+            return;
+        }
+
+        // 2. Continuous Fractional Digit Generator
+        System.out.print(".");
+        long digitsOutput = 0;
+
+        while (!rem.equals(ZERO)) {
+            if (maxDecimalPlaces >= 0 && digitsOutput >= maxDecimalPlaces) {
+                break;
+            }
+
+            // Bring down next decimal digit: rem = rem * 10
+            rem = multiply(rem, TEN);
+
+            // Determine next single digit using binary long division
+            BigInteger digit = longDivide(rem, den);
+            System.out.print(digit);
+
+            // Update remainder: rem = rem - (digit * den)
+            rem = rem.subtract(multiply(digit, den));
+
+            digitsOutput++;
+        }
+
+        System.out.println();
     }
 
-    // ── Demonstration ─────────────────────────────────────────────────────────
+    // ── Interactive Program Entry Point ──────────────────────────────────────
 
     public static void main(String[] args) {
-        System.out.println("=== BigInteger Fixed-Point Demo (PRECISION=" + PRECISION + ") ===\n");
+        Scanner scanner = new Scanner(System.in);
 
-        BigFixedArithmetic a = BigFixedArithmetic.of("123456789.987654321");
-        BigFixedArithmetic b = BigFixedArithmetic.of("0.333333333333333333");
+        System.out.println("=== BigFixedArithmetic Demo ===");
+        System.out.print("Enter Dividend / First Operand: ");
+        BigInteger a = new BigInteger(scanner.next());
 
-        System.out.println("a            = " + a);
-        System.out.println("b            = " + b);
-        System.out.println("a + b        = " + a.add(b));
-        System.out.println("a - b        = " + a.subtract(b));
-        System.out.println("a * b        = " + a.multiply(b));
-        System.out.println("a / b        = " + a.divide(b));
-        System.out.println("1 / 3        = " + BigFixedArithmetic.of(1).divide(BigFixedArithmetic.of(3)));
+        System.out.print("Enter Divisor / Second Operand: ");
+        BigInteger b = new BigInteger(scanner.next());
+
+        System.out.println("\n--- Basic Operations ---");
+        System.out.println("Addition (a + b)       : " + add(a, b));
+        System.out.println("Subtraction (a - b)    : " + subtract(a, b));
+        System.out.println("Multiplication (a * b) : " + multiply(a, b));
+
+        System.out.println("\n--- Streaming Division ---");
+        System.out.print("Enter required decimal places (-1 for unlimited streaming): ");
+        long precision = scanner.nextLong();
+
+        System.out.print("Division Result (a / b): ");
+        streamDivide(a, b, precision);
+
+        scanner.close();
     }
 }
