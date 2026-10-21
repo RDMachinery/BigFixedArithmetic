@@ -314,6 +314,51 @@ Finance.allocate(Rational.parse("12.00"), 2, Remainder.FIRST,
 - The amount must be an exact multiple of the unit (`allocate(1/300, 2, ...)` throws `ArithmeticException`), and weights must be non-negative and not all zero.
 - `Finance.sum(values...)` adds exact values, for checking that an allocation reconciles.
 
+### Engineering ratios
+
+The nested `Engineering` class helps with the ratios found in electronics and signal work: picking integer multipliers and dividers for a clock or PLL, UART baud divisors, sample-rate conversion, resistor networks and E-series values, and fixed-point quantisation. Every error is reported exactly (as a fraction) and in parts per million.
+
+```java
+import BigFixedArithmetic.Engineering;
+
+// Best ratio p/q with p and q both limited (here to 1000)
+Engineering.bestRatio(Rational.parse("3.14159265358979"), 1000, 1000);       // 355/113 (error 0.08 ppm)
+
+// Make 48 kHz from a 25 MHz reference with multiplier and divider limits of 4096
+Engineering.synthesize(Rational.of(25_000_000), Rational.of(48_000), 4096, 4096);
+                                                                              // x6 / 3125 = 48000 Hz (error 0 ppm)
+
+// UART baud divisors (oversample 16): a 16 MHz clock cannot hit 115200 well, 11.0592 MHz can
+Engineering.uartDivisor(Rational.of(16_000_000), 115200, 16, 65535);          // /9, error -35493.83 ppm
+Engineering.uartDivisor(Rational.of(11_059_200), 115200, 16, 65535);          // /6 = 115200 Hz (error 0 ppm)
+
+// Sample-rate conversion factors {up, down}
+Engineering.sampleRateRatio(Rational.of(44100), Rational.of(48000));          // [160, 147]
+
+// Resistors
+Engineering.parallelResistance(Rational.of(10), Rational.of(20), Rational.of(30));   // 60/11, exactly
+Engineering.nearestStandard(Rational.of(4800), 12);                           // 4700 (E12)
+Engineering.bestStandardPair(Rational.parse("3.3"), 24);                      // R1=1, R2=33/10 (error 0 ppm)
+
+// Fixed point: why 0.1 is not exact in binary
+Rational.parse("0.1").toRadixString(2, -1, RoundingMode.HALF_UP);            // "0.0(0011)"
+Engineering.quantise(Rational.parse("0.1"), 8, RoundingMode.HALF_EVEN);       // 26 / 2^8 = 13/128 (error 1/640)
+Engineering.bitsNeeded(Rational.parse("0.1"), Rational.of(1, 1000));          // 9
+```
+
+| Group | Methods |
+|---|---|
+| Best ratios | `bestRatio(target, maxNumerator, maxDenominator)`, `convergentLadder(target, maxDenominator)`, `sampleRateRatio(from, to)` |
+| Clocks and PLLs | `synthesize(reference, target, maxMultiplier, maxDivider)`, `integerDivider(source, target, maxDivisor)`, `uartDivisor(clock, baud, oversample, maxDivisor)` |
+| Resistors | `seriesResistance`, `parallelResistance`, `voltageDivider(vin, r1, r2)`, `eSeries(n)`, `nearestStandard(value, series)`, `bestStandardPair(ratio, series)` |
+| Fixed point | `quantise(value, fractionalBits, mode)`, `bitsNeeded(value, maxError)`, `isDyadic(value)` |
+
+Notes:
+- `bestRatio` tries every denominator up to the limit, so `maxDenominator` is capped at 10,000,000 (a million denominators takes about a third of a second). Ties go to the smaller denominator, and the result is always in lowest terms.
+- `eSeries` supports E3, E6, E12, E24 (the published two-digit values) and E48, E96, E192 (10^(i/n) correctly rounded to three significant figures, using the library's own root function). The generated E48 and E96 lists were checked against the published tables.
+- `bestStandardPair` returns `r1` as a value from 1.0 to under 10 and `r2` in whatever decade gives the best ratio; multiply both by the same power of ten to choose real resistances. Searching E192 takes about half a second.
+- Dividers report the output frequency as an exact fraction, so a divide-by-9 of 16 MHz prints as 1000000/9 Hz.
+
 ### API summary
 
 **Static arithmetic**
@@ -383,7 +428,7 @@ For the nth root of `x` kept to `k` decimal places, `floor(root(x) * 10^k)` equa
 
 ## Testing
 
-The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. The number-theory class was checked against brute-force definitions (totient, divisor functions, Moebius, Carmichael lambda, multiplicative order, Farey sequences and neighbours, Pell minimality, the Bernoulli recurrence, von Staudt-Clausen denominators, sums of powers). Allocation was checked against an independent reference over 60,000 random splits under all three leftover rules, including that the shares always sum exactly to the amount. In total over 1,300,000 checks ran with no differences.
+The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. The number-theory class was checked against brute-force definitions (totient, divisor functions, Moebius, Carmichael lambda, multiplicative order, Farey sequences and neighbours, Pell minimality, the Bernoulli recurrence, von Staudt-Clausen denominators, sums of powers). Allocation was checked against an independent reference over 60,000 random splits under all three leftover rules, including that the shares always sum exactly to the amount. The engineering tools were checked against brute-force searches over every numerator and denominator, every divisor and every decade, and the generated E-series against the published tables. In total over 1,300,000 checks ran with no differences.
 
 ## License
 

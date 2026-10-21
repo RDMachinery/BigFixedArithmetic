@@ -51,6 +51,11 @@ import java.util.function.Consumer;
  * <h2>{@link Finance}</h2>
  * Allocation of money in proportion to weights so the shares add back to
  * exactly the original amount.
+ *
+ * <h2>{@link Engineering}</h2>
+ * Best ratios under numerator and denominator limits (PLL, divider and
+ * sample-rate choices), UART divisors, resistor networks and E-series values,
+ * and fixed-point quantisation.
  */
 public class BigFixedArithmetic {
 
@@ -2900,6 +2905,462 @@ public class BigFixedArithmetic {
                 total = total.add(v);
             }
             return total;
+        }
+    }
+
+    // ── Engineering ratios ───────────────────────────────────────────────────
+
+    /**
+     * Engineering ratio tools: the best rational ratio under limits on both
+     * numerator and denominator (for PLL, clock-divider and sample-rate
+     * choices), integer dividers and UART baud divisors, resistor networks and
+     * the standard E-series values, and fixed-point quantisation.  Everything is
+     * exact; errors are reported as exact fractions and in parts per million.
+     */
+    public static final class Engineering {
+        private Engineering() {
+        }
+
+        private static final BigInteger MILLION = BigInteger.valueOf(1_000_000L);
+
+        /** Longest search {@link #bestRatio} will run (denominators tried). */
+        public static final long MAX_SEARCH = 10_000_000L;
+
+        private static String ppm(Rational relativeError) {
+            return relativeError.multiply(Rational.of(MILLION)).toDecimalString(2, RoundingMode.HALF_UP) + " ppm";
+        }
+
+        private static void requirePositive(Rational x, String what) {
+            if (x.signum() <= 0) {
+                throw new ArithmeticException(what + " must be positive");
+            }
+        }
+
+        // ── best ratios ──────────────────────────────────────────────────────
+
+        /** A ratio numerator/denominator chosen to approximate a target, with its exact error. */
+        public static final class Ratio {
+            public final BigInteger numerator;
+            public final BigInteger denominator;
+            /** numerator / denominator, exactly. */
+            public final Rational value;
+            public final Rational target;
+            /** value - target, exactly. */
+            public final Rational error;
+            /** (value - target) / target, exactly. */
+            public final Rational relativeError;
+
+            Ratio(BigInteger numerator, BigInteger denominator, Rational target) {
+                this.numerator = numerator;
+                this.denominator = denominator;
+                this.value = Rational.of(numerator, denominator);
+                this.target = target;
+                this.error = value.subtract(target);
+                this.relativeError = error.divide(target);
+            }
+
+            @Override
+            public String toString() {
+                return numerator + "/" + denominator + " (error " + ppm(relativeError) + ")";
+            }
+        }
+
+        /**
+         * The ratio p/q with 1 &lt;= p &lt;= maxNumerator and 1 &lt;= q &lt;= maxDenominator
+         * that is closest to target (smallest denominator on a tie).  It tries
+         * every denominator, so maxDenominator is limited to {@link #MAX_SEARCH}.
+         * Note that p/q is returned as chosen, so it is always in lowest terms.
+         *
+         * @throws ArithmeticException if target is not positive
+         * @throws IllegalArgumentException if a limit is below 1 or maxDenominator exceeds the search limit
+         */
+        public static Ratio bestRatio(Rational target, long maxNumerator, long maxDenominator) {
+            requirePositive(target, "Target");
+            if (maxNumerator < 1 || maxDenominator < 1 || maxDenominator > MAX_SEARCH) {
+                throw new IllegalArgumentException("Limits must be at least 1, and maxDenominator at most " + MAX_SEARCH);
+            }
+            BigInteger a = target.num;
+            BigInteger b = target.den;
+            BigInteger maxN = BigInteger.valueOf(maxNumerator);
+            BigInteger bestP = null;
+            BigInteger bestQ = null;
+            BigInteger bestErr = null;   // |p*b - a*q|, compared as err/q
+            for (long qq = 1; qq <= maxDenominator; qq++) {
+                BigInteger q = BigInteger.valueOf(qq);
+                BigInteger lo = a.multiply(q).divide(b);   // floor(target * q)
+                if (lo.compareTo(maxN) > 0 && bestP != null) {
+                    break;   // numerators are all clipped to the limit and only get worse
+                }
+                for (int k = 0; k < 2; k++) {
+                    BigInteger p = lo.add(BigInteger.valueOf(k));
+                    if (p.signum() < 1) {
+                        p = BigInteger.ONE;
+                    }
+                    if (p.compareTo(maxN) > 0) {
+                        p = maxN;
+                    }
+                    BigInteger err = p.multiply(b).subtract(a.multiply(q)).abs();
+                    if (bestErr == null || err.multiply(bestQ).compareTo(bestErr.multiply(q)) < 0) {
+                        bestP = p;
+                        bestQ = q;
+                        bestErr = err;
+                    }
+                }
+            }
+            BigInteger g = bestP.gcd(bestQ);
+            return new Ratio(bestP.divide(g), bestQ.divide(g), target);
+        }
+
+        /**
+         * The convergents of target (its continued-fraction ladder of ever better
+         * ratios) whose denominators are at most maxDenominator, in order.
+         */
+        public static List<Ratio> convergentLadder(Rational target, BigInteger maxDenominator) {
+            requirePositive(target, "Target");
+            List<Ratio> out = new ArrayList<>();
+            for (Rational c : target.convergents()) {
+                if (c.den.compareTo(maxDenominator) > 0) {
+                    break;
+                }
+                if (c.signum() > 0) {
+                    out.add(new Ratio(c.num, c.den, target));
+                }
+            }
+            return out;
+        }
+
+        /** The exact up/down factors {up, down} to convert a sample rate: 44100 to 48000 is {160, 147}. */
+        public static BigInteger[] sampleRateRatio(Rational fromHz, Rational toHz) {
+            requirePositive(fromHz, "Source rate");
+            requirePositive(toHz, "Target rate");
+            Rational r = toHz.divide(fromHz);
+            return new BigInteger[] {r.num, r.den};
+        }
+
+        // ── clocks, PLLs and UARTs ───────────────────────────────────────────
+
+        /** A frequency made from a reference by multiplying and dividing by integers. */
+        public static final class Synthesis {
+            public final BigInteger multiplier;
+            public final BigInteger divider;
+            public final Rational outputHz;
+            public final Rational targetHz;
+            /** outputHz - targetHz, exactly. */
+            public final Rational errorHz;
+            public final Rational relativeError;
+
+            Synthesis(BigInteger multiplier, BigInteger divider, Rational reference, Rational targetHz) {
+                this.multiplier = multiplier;
+                this.divider = divider;
+                this.outputHz = reference.multiply(Rational.of(multiplier, divider));
+                this.targetHz = targetHz;
+                this.errorHz = outputHz.subtract(targetHz);
+                this.relativeError = errorHz.divide(targetHz);
+            }
+
+            @Override
+            public String toString() {
+                return "x" + multiplier + " / " + divider + " = " + outputHz + " Hz (error " + ppm(relativeError) + ")";
+            }
+        }
+
+        /**
+         * The multiplier and divider (each from 1 up to its limit) that make the
+         * frequency closest to targetHz from a reference: output = reference *
+         * multiplier / divider.
+         */
+        public static Synthesis synthesize(Rational referenceHz, Rational targetHz, long maxMultiplier, long maxDivider) {
+            requirePositive(referenceHz, "Reference");
+            requirePositive(targetHz, "Target");
+            Ratio r = bestRatio(targetHz.divide(referenceHz), maxMultiplier, maxDivider);
+            return new Synthesis(r.numerator, r.denominator, referenceHz, targetHz);
+        }
+
+        /** An integer divider of a source frequency. */
+        public static final class Divider {
+            public final BigInteger divisor;
+            public final Rational outputHz;
+            public final Rational targetHz;
+            public final Rational errorHz;
+            public final Rational relativeError;
+
+            Divider(BigInteger divisor, Rational source, Rational targetHz) {
+                this.divisor = divisor;
+                this.outputHz = source.divide(Rational.of(divisor));
+                this.targetHz = targetHz;
+                this.errorHz = outputHz.subtract(targetHz);
+                this.relativeError = errorHz.divide(targetHz);
+            }
+
+            @Override
+            public String toString() {
+                return "/" + divisor + " = " + outputHz + " Hz (error " + ppm(relativeError) + ")";
+            }
+        }
+
+        /** The integer divisor from 1 to maxDivisor that puts source/divisor closest to targetHz (smaller divisor on a tie). */
+        public static Divider integerDivider(Rational sourceHz, Rational targetHz, long maxDivisor) {
+            requirePositive(sourceHz, "Source");
+            requirePositive(targetHz, "Target");
+            if (maxDivisor < 1) {
+                throw new IllegalArgumentException("maxDivisor must be at least 1");
+            }
+            BigInteger lo = sourceHz.divide(targetHz).floor();
+            BigInteger best = null;
+            Rational bestErr = null;
+            for (int k = 0; k < 2; k++) {
+                BigInteger n = lo.add(BigInteger.valueOf(k));
+                if (n.signum() < 1) {
+                    n = BigInteger.ONE;
+                }
+                if (n.compareTo(BigInteger.valueOf(maxDivisor)) > 0) {
+                    n = BigInteger.valueOf(maxDivisor);
+                }
+                Rational err = sourceHz.divide(Rational.of(n)).subtract(targetHz).abs();
+                if (bestErr == null || err.compareTo(bestErr) < 0) {
+                    best = n;
+                    bestErr = err;
+                }
+            }
+            return new Divider(best, sourceHz, targetHz);
+        }
+
+        /**
+         * The UART baud-rate divisor for a clock: the integer divisor of
+         * clock / oversample that gives the rate closest to baud (an oversample
+         * of 16 is typical).
+         */
+        public static Divider uartDivisor(Rational clockHz, long baud, int oversample, long maxDivisor) {
+            if (oversample < 1) {
+                throw new IllegalArgumentException("oversample must be at least 1");
+            }
+            return integerDivider(clockHz.divide(Rational.of(oversample)), Rational.of(baud), maxDivisor);
+        }
+
+        // ── resistor networks and E-series ───────────────────────────────────
+
+        /** Resistance of resistors in series (the sum). */
+        public static Rational seriesResistance(Rational... r) {
+            Rational total = Rational.ZERO;
+            for (Rational x : r) {
+                total = total.add(x);
+            }
+            return total;
+        }
+
+        /** Resistance of resistors in parallel, exactly; zero if any resistor is zero. */
+        public static Rational parallelResistance(Rational... r) {
+            if (r.length == 0) {
+                throw new ArithmeticException("At least one resistor is required");
+            }
+            Rational conductance = Rational.ZERO;
+            for (Rational x : r) {
+                if (x.signum() < 0) {
+                    throw new ArithmeticException("Resistance must not be negative");
+                }
+                if (x.signum() == 0) {
+                    return Rational.ZERO;
+                }
+                conductance = conductance.add(x.reciprocal());
+            }
+            return conductance.reciprocal();
+        }
+
+        /** Output of a resistive divider: vin * r2 / (r1 + r2). */
+        public static Rational voltageDivider(Rational vin, Rational r1, Rational r2) {
+            return vin.multiply(r2).divide(r1.add(r2));
+        }
+
+        private static final String[] E24 = {"1.0", "1.1", "1.2", "1.3", "1.5", "1.6", "1.8", "2.0", "2.2", "2.4",
+            "2.7", "3.0", "3.3", "3.6", "3.9", "4.3", "4.7", "5.1", "5.6", "6.2", "6.8", "7.5", "8.2", "9.1"};
+        private static final String[] E12 = {"1.0", "1.2", "1.5", "1.8", "2.2", "2.7", "3.3", "3.9", "4.7", "5.6", "6.8", "8.2"};
+        private static final String[] E6 = {"1.0", "1.5", "2.2", "3.3", "4.7", "6.8"};
+        private static final String[] E3 = {"1.0", "2.2", "4.7"};
+        private static final java.util.Map<Integer, List<Rational>> SERIES_CACHE = new java.util.HashMap<>();
+
+        /**
+         * The values of an IEC 60063 E-series in one decade, from 1.0 up to just
+         * below 10: series 3, 6, 12, 24 (the published two-digit values) or 48,
+         * 96, 192 (10^(i/n) correctly rounded to three significant figures).
+         */
+        public static synchronized List<Rational> eSeries(int series) {
+            List<Rational> cached = SERIES_CACHE.get(series);
+            if (cached != null) {
+                return cached;
+            }
+            List<Rational> out = new ArrayList<>();
+            String[] table = series == 3 ? E3 : series == 6 ? E6 : series == 12 ? E12 : series == 24 ? E24 : null;
+            if (table != null) {
+                for (String s : table) {
+                    out.add(Rational.parse(s));
+                }
+            } else if (series == 48 || series == 96 || series == 192) {
+                Rational.Context three = Rational.Context.significantDigits(3, RoundingMode.HALF_UP);
+                for (int i = 0; i < series; i++) {
+                    out.add(Rational.of(10).pow(Rational.of(i, series), three));
+                }
+            } else {
+                throw new IllegalArgumentException("Series must be 3, 6, 12, 24, 48, 96 or 192");
+            }
+            List<Rational> result = Collections.unmodifiableList(out);
+            SERIES_CACHE.put(series, result);
+            return result;
+        }
+
+        /** The exponent e with 10^e &lt;= x &lt; 10^(e+1), for positive x. */
+        private static int decade(Rational x) {
+            int e = x.num.toString().length() - x.den.toString().length();
+            Rational p = e >= 0 ? Rational.of(BigInteger.TEN.pow(e)) : Rational.of(BigInteger.ONE, BigInteger.TEN.pow(-e));
+            Rational m = x.divide(p);
+            if (m.compareTo(Rational.ONE) < 0) {
+                e--;
+            } else if (m.compareTo(Rational.of(10)) >= 0) {
+                e++;
+            }
+            return e;
+        }
+
+        private static Rational pow10(int e) {
+            return e >= 0 ? Rational.of(BigInteger.TEN.pow(e)) : Rational.of(BigInteger.ONE, BigInteger.TEN.pow(-e));
+        }
+
+        /**
+         * The standard value in the given E-series nearest to value (by absolute
+         * difference; the smaller value on a tie), in any decade.
+         */
+        public static Rational nearestStandard(Rational value, int series) {
+            requirePositive(value, "Value");
+            List<Rational> values = eSeries(series);
+            int e = decade(value);
+            Rational scale = pow10(e);
+            Rational m = value.divide(scale);
+            Rational best = null;
+            Rational bestDiff = null;
+            for (int k = 0; k <= values.size(); k++) {
+                Rational c = k < values.size() ? values.get(k) : Rational.of(10);
+                Rational diff = c.subtract(m).abs();
+                if (bestDiff == null || diff.compareTo(bestDiff) < 0) {
+                    best = c;
+                    bestDiff = diff;
+                }
+            }
+            return best.multiply(scale);
+        }
+
+        /** Two standard resistor values whose ratio r2/r1 approximates a target. */
+        public static final class ResistorPair {
+            /** A standard value from 1.0 up to 10; scale both resistors by the same power of ten. */
+            public final Rational r1;
+            public final Rational r2;
+            public final Rational ratio;
+            public final Rational target;
+            public final Rational relativeError;
+
+            ResistorPair(Rational r1, Rational r2, Rational target) {
+                this.r1 = r1;
+                this.r2 = r2;
+                this.ratio = r2.divide(r1);
+                this.target = target;
+                this.relativeError = ratio.subtract(target).divide(target);
+            }
+
+            @Override
+            public String toString() {
+                return "R1=" + r1 + ", R2=" + r2 + " (ratio " + ratio + ", error " + ppm(relativeError) + ")";
+            }
+        }
+
+        /**
+         * The pair of values from one E-series (r1 a mantissa from 1.0 to under 10,
+         * r2 in any decade) whose ratio r2/r1 is closest to the target ratio.
+         * Multiply both by the same power of ten to pick the actual resistances.
+         */
+        public static ResistorPair bestStandardPair(Rational ratio, int series) {
+            requirePositive(ratio, "Ratio");
+            List<Rational> values = eSeries(series);
+            Rational bestR1 = null;
+            Rational bestR2 = null;
+            Rational bestDiff = null;
+            for (Rational la : values) {
+                for (Rational lb : values) {
+                    Rational q = lb.divide(la);
+                    int e0 = decade(ratio.divide(q));
+                    for (int k = 0; k < 2; k++) {
+                        Rational r2 = lb.multiply(pow10(e0 + k));
+                        Rational diff = r2.divide(la).subtract(ratio).abs();
+                        if (bestDiff == null || diff.compareTo(bestDiff) < 0) {
+                            bestR1 = la;
+                            bestR2 = r2;
+                            bestDiff = diff;
+                        }
+                    }
+                }
+            }
+            return new ResistorPair(bestR1, bestR2, ratio);
+        }
+
+        // ── fixed-point quantisation ─────────────────────────────────────────
+
+        /** A value stored as a fixed-point integer with a number of fractional bits. */
+        public static final class Quantised {
+            /** The stored integer: represented value = raw / 2^fractionalBits. */
+            public final BigInteger raw;
+            public final int fractionalBits;
+            public final Rational represented;
+            /** represented - original, exactly. */
+            public final Rational error;
+
+            Quantised(BigInteger raw, int fractionalBits, Rational original) {
+                this.raw = raw;
+                this.fractionalBits = fractionalBits;
+                this.represented = Rational.of(raw, BigInteger.ONE.shiftLeft(fractionalBits));
+                this.error = represented.subtract(original);
+            }
+
+            @Override
+            public String toString() {
+                return raw + " / 2^" + fractionalBits + " = " + represented + " (error " + error + ")";
+            }
+        }
+
+        /** Rounds value to a fixed-point number with the given fractional bits. */
+        public static Quantised quantise(Rational value, int fractionalBits, RoundingMode mode) {
+            if (fractionalBits < 0 || fractionalBits > 100_000) {
+                throw new IllegalArgumentException("fractionalBits must be from 0 to 100000");
+            }
+            Rational scaled = value.multiply(Rational.of(BigInteger.ONE.shiftLeft(fractionalBits)));
+            return new Quantised(scaled.round(mode), fractionalBits, value);
+        }
+
+        /** True when value can be stored exactly in binary (its denominator is a power of two). */
+        public static boolean isDyadic(Rational value) {
+            return value.den.bitCount() == 1;
+        }
+
+        /**
+         * The smallest number of fractional bits whose nearest (half-even)
+         * representation of value is within maxAbsError.
+         *
+         * @throws ArithmeticException if more than 100000 bits would be needed
+         */
+        public static int bitsNeeded(Rational value, Rational maxAbsError) {
+            if (maxAbsError.signum() < 0) {
+                throw new ArithmeticException("maxAbsError must not be negative");
+            }
+            if (isDyadic(value)) {
+                int exact = value.den.bitLength() - 1;
+                for (int bits = 0; bits <= exact; bits++) {
+                    if (quantise(value, bits, RoundingMode.HALF_EVEN).error.abs().compareTo(maxAbsError) <= 0) {
+                        return bits;
+                    }
+                }
+            }
+            for (int bits = 0; bits <= 100_000; bits++) {
+                if (quantise(value, bits, RoundingMode.HALF_EVEN).error.abs().compareTo(maxAbsError) <= 0) {
+                    return bits;
+                }
+            }
+            throw new ArithmeticException("More than 100000 bits needed");
         }
     }
 
