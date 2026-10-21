@@ -1,8 +1,34 @@
-![Splash](splash.jpeg)
-
 # BigFixedArithmetic
 
 Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers from strings (including scientific notation) without losing a digit, divides exactly (repeating decimals are detected and shown as `0.(3)`), and includes a `Rational` fraction type, a `Number` subclass, with features `BigDecimal` doesn't have: repeating-decimal parsing, cycle analysis, expansion in any base, continued fractions, best approximations, correctly rounded square roots, nth roots and fractional powers, and bounded-precision contexts that stop fractions growing without limit.
+
+## Table of contents
+
+- [Features](#features)
+- [When to use BigFixedArithmetic (and when to use BigDecimal first)](#when-to-use-bigfixedarithmetic-and-when-to-use-bigdecimal-first)
+  - [Financial applications](#financial-applications)
+  - [Scientific applications](#scientific-applications)
+  - [Where BigDecimal is the better choice](#where-bigdecimal-is-the-better-choice)
+- [Requirements](#requirements)
+- [Build and run](#build-and-run)
+- [Using it as a library](#using-it-as-a-library)
+  - [Division](#division)
+  - [Rational](#rational)
+  - [Number conversions](#number-conversions)
+  - [Scientific and engineering notation](#scientific-and-engineering-notation)
+  - [Bounded precision](#bounded-precision)
+  - [Square roots, nth roots and powers](#square-roots-nth-roots-and-powers)
+  - [Number theory](#number-theory)
+  - [Finance: allocating money without losing a cent](#finance-allocating-money-without-losing-a-cent)
+  - [Engineering ratios](#engineering-ratios)
+  - [API summary](#api-summary)
+  - [Division modes](#division-modes)
+  - [Accepted input formats](#accepted-input-formats)
+- [How repeating decimals are detected](#how-repeating-decimals-are-detected)
+- [How roots are rounded correctly](#how-roots-are-rounded-correctly)
+- [Limitations](#limitations)
+- [Testing](#testing)
+- [License](#license)
 
 ## Features
 
