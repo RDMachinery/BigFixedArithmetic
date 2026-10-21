@@ -287,6 +287,33 @@ NumberTheory.sumOfPowers(3, BigInteger.valueOf(100));                       // 2
 
 Limits: `factorize` is quick when the second-smallest prime factor is below about 12 digits and can take minutes to hours when n has two prime factors of 17 digits or more (2^128+1 did not finish in several minutes); `fareySequence` is limited to n of 20000; `bernoulli` and `sumOfPowers` are limited to index 20000; `sternBrocotPath` refuses paths longer than ten million steps.
 
+### Finance: allocating money without losing a cent
+
+The nested `Finance` class splits an amount in proportion to weights so that the parts add back to exactly the original amount, with no cent lost or invented. This is the case where `BigDecimal` division forces you to round each share and then patch the total by hand.
+
+```java
+import BigFixedArithmetic.Finance;
+import BigFixedArithmetic.Finance.Remainder;
+
+Rational[] parts = Finance.allocateEvenly(Rational.of(100), 2, 3);   // 33.34, 33.33, 33.33 (as exact fractions)
+Finance.sum(parts);                                                    // 100
+
+// Proportional split: 70% / 20% / 10% of 0.05, in whole cents
+Finance.allocate(Rational.parse("0.05"), 2,
+                 Rational.of(70), Rational.of(20), Rational.of(10));   // 0.04, 0.01, 0.00
+
+// A different rule for the leftover cents, and rational weights
+Finance.allocate(Rational.parse("12.00"), 2, Remainder.FIRST,
+                 Rational.of(1, 2), Rational.of(1, 3), Rational.of(1, 6));   // 6.00, 4.00, 2.00
+```
+
+- `allocate(amount, places, weights...)` and `allocate(amount, places, rule, weights...)` work in whole units of 10^-places (`places = 2` is cents).
+- `allocateEvenly(amount, places, n)` splits into n equal shares; the first few are one unit larger when the amount does not divide evenly.
+- `Remainder.LARGEST_REMAINDER` (the default) gives each leftover unit to the share with the largest fractional part, earlier shares first on ties, so no share is more than one unit from its exact value. `FIRST` and `LAST` give the leftover units one each to the first or last shares with a non-zero weight.
+- A negative amount gives negative shares. A share with weight zero always gets zero.
+- The amount must be an exact multiple of the unit (`allocate(1/300, 2, ...)` throws `ArithmeticException`), and weights must be non-negative and not all zero.
+- `Finance.sum(values...)` adds exact values, for checking that an allocation reconciles.
+
 ### API summary
 
 **Static arithmetic**
@@ -356,7 +383,7 @@ For the nth root of `x` kept to `k` decimal places, `floor(root(x) * 10^k)` equa
 
 ## Testing
 
-The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. The number-theory class was checked against brute-force definitions (totient, divisor functions, Moebius, Carmichael lambda, multiplicative order, Farey sequences and neighbours, Pell minimality, the Bernoulli recurrence, von Staudt-Clausen denominators, sums of powers). In total over 1,000,000 checks ran with no differences.
+The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. The number-theory class was checked against brute-force definitions (totient, divisor functions, Moebius, Carmichael lambda, multiplicative order, Farey sequences and neighbours, Pell minimality, the Bernoulli recurrence, von Staudt-Clausen denominators, sums of powers). Allocation was checked against an independent reference over 60,000 random splits under all three leftover rules, including that the shares always sum exactly to the amount. In total over 1,300,000 checks ran with no differences.
 
 ## License
 

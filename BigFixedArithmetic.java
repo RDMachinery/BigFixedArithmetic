@@ -47,6 +47,10 @@ import java.util.function.Consumer;
  * factorisation, arithmetic functions, multiplicative order and primitive roots,
  * Farey sequences, Stern-Brocot paths, Pell equations, and exact Bernoulli
  * numbers, harmonic numbers and sums of powers.
+ *
+ * <h2>{@link Finance}</h2>
+ * Allocation of money in proportion to weights so the shares add back to
+ * exactly the original amount.
  */
 public class BigFixedArithmetic {
 
@@ -2753,6 +2757,149 @@ public class BigFixedArithmetic {
                 throw new IllegalStateException("Sum of powers was not an integer");
             }
             return result.num;
+        }
+    }
+
+    // ── Finance ──────────────────────────────────────────────────────────────
+
+    /**
+     * Financial helpers built on exact fractions.
+     *
+     * <p>{@link #allocate} splits an amount of money in proportion to weights so
+     * that the parts add back to exactly the original amount, with no cent lost
+     * or invented.  For example 100.00 split three ways is 33.34, 33.33, 33.33.
+     */
+    public static final class Finance {
+        private Finance() {
+        }
+
+        /** Where the units left over after rounding every share down are given. */
+        public enum Remainder {
+            /** One extra unit each to the shares with the largest fractional parts (ties: earlier share first). */
+            LARGEST_REMAINDER,
+            /** Extra units go to the first shares that have a non-zero weight, one each. */
+            FIRST,
+            /** Extra units go to the last shares that have a non-zero weight, one each. */
+            LAST
+        }
+
+        private static final int MAX_PLACES = 1000;
+
+        /**
+         * Splits amount in proportion to weights, in whole units of 10^-places
+         * (places = 2 gives cents), so that the shares sum to exactly amount.
+         * The leftover units are given by {@link Remainder#LARGEST_REMAINDER}.
+         *
+         * @param amount  the amount to split; must be an exact multiple of 10^-places
+         * @param places  decimal places of the smallest unit (2 for cents), 0 to 1000
+         * @param weights non-negative weights (not all zero); a share with weight zero gets zero
+         * @return the shares, in the order of the weights; a negative amount gives negative shares
+         * @throws ArithmeticException if amount is not a multiple of the unit, a
+         *         weight is negative, or the weights sum to zero
+         */
+        public static Rational[] allocate(Rational amount, int places, Rational... weights) {
+            return allocate(amount, places, Remainder.LARGEST_REMAINDER, weights);
+        }
+
+        /** As {@link #allocate(Rational, int, Rational...)}, with a chosen rule for the leftover units. */
+        public static Rational[] allocate(Rational amount, int places, Remainder rule, Rational... weights) {
+            if (places < 0 || places > MAX_PLACES) {
+                throw new IllegalArgumentException("places must be from 0 to " + MAX_PLACES);
+            }
+            Objects.requireNonNull(rule, "rule");
+            if (weights.length == 0) {
+                throw new ArithmeticException("At least one weight is required");
+            }
+            BigInteger unit = BigInteger.TEN.pow(places);
+            Rational scaled = amount.multiply(Rational.of(unit));
+            if (!scaled.isInteger()) {
+                throw new ArithmeticException("Amount " + amount + " is not a multiple of one unit (10^-" + places + ")");
+            }
+            BigInteger total = scaled.num;
+            boolean negative = total.signum() < 0;
+            total = total.abs();
+
+            // Weights as integers over a common denominator.
+            BigInteger common = BigInteger.ONE;
+            for (Rational w : weights) {
+                if (w.signum() < 0) {
+                    throw new ArithmeticException("Weights must not be negative");
+                }
+                common = NumberTheory.lcm(common, w.den);
+            }
+            BigInteger[] w = new BigInteger[weights.length];
+            BigInteger weightSum = BigInteger.ZERO;
+            for (int i = 0; i < w.length; i++) {
+                w[i] = weights[i].num.multiply(common.divide(weights[i].den));
+                weightSum = weightSum.add(w[i]);
+            }
+            if (weightSum.signum() == 0) {
+                throw new ArithmeticException("Weights sum to zero");
+            }
+
+            BigInteger[] units = new BigInteger[w.length];
+            BigInteger[] remainders = new BigInteger[w.length];
+            BigInteger given = BigInteger.ZERO;
+            for (int i = 0; i < w.length; i++) {
+                BigInteger[] qr = total.multiply(w[i]).divideAndRemainder(weightSum);
+                units[i] = qr[0];
+                remainders[i] = qr[1];
+                given = given.add(qr[0]);
+            }
+            int extra = total.subtract(given).intValueExact();   // fewer than w.length
+
+            if (rule == Remainder.LARGEST_REMAINDER) {
+                Integer[] order = new Integer[w.length];
+                for (int i = 0; i < order.length; i++) {
+                    order[i] = i;
+                }
+                java.util.Arrays.sort(order, (x, y) -> {
+                    int c = remainders[y].compareTo(remainders[x]);
+                    return c != 0 ? c : Integer.compare(x, y);
+                });
+                for (int k = 0; k < extra; k++) {
+                    units[order[k]] = units[order[k]].add(BigInteger.ONE);
+                }
+            } else {
+                int step = rule == Remainder.FIRST ? 1 : -1;
+                int i = rule == Remainder.FIRST ? 0 : w.length - 1;
+                while (extra > 0) {
+                    if (w[i].signum() > 0) {
+                        units[i] = units[i].add(BigInteger.ONE);
+                        extra--;
+                    }
+                    i += step;
+                }
+            }
+
+            Rational[] out = new Rational[w.length];
+            for (int i = 0; i < out.length; i++) {
+                out[i] = Rational.of(negative ? units[i].negate() : units[i], unit);
+            }
+            return out;
+        }
+
+        /**
+         * Splits amount into n equal shares to the nearest unit of 10^-places, the
+         * first few shares being one unit larger when it does not divide evenly:
+         * 100.00 split three ways is 33.34, 33.33, 33.33.
+         */
+        public static Rational[] allocateEvenly(Rational amount, int places, int n) {
+            if (n < 1) {
+                throw new IllegalArgumentException("n must be at least 1");
+            }
+            Rational[] weights = new Rational[n];
+            java.util.Arrays.fill(weights, Rational.ONE);
+            return allocate(amount, places, Remainder.LARGEST_REMAINDER, weights);
+        }
+
+        /** The exact sum of the values, for checking that an allocation adds back to the original. */
+        public static Rational sum(Rational... values) {
+            Rational total = Rational.ZERO;
+            for (Rational v : values) {
+                total = total.add(v);
+            }
+            return total;
         }
     }
 
