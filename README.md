@@ -245,6 +245,48 @@ Roots and fractional powers are **correctly rounded**: the result is the true va
 
 `hasRationalRoot(n)` tells you in advance whether the nth root is rational.
 
+### Number theory
+
+The nested `NumberTheory` class collects number-theory tools. It uses `BigInteger`'s own fast multiply, mod and gcd rather than the long-hand routines, because factorisation and modular exponentiation are impractical otherwise. Fractional results come back as exact `Rational` values.
+
+```java
+import java.math.BigInteger;
+import BigFixedArithmetic.NumberTheory;   // the nested class; Rational is BigFixedArithmetic.Rational
+
+NumberTheory.extendedGcd(BigInteger.valueOf(240), BigInteger.valueOf(46));  // gcd=2, x=-9, y=47
+NumberTheory.modInverse(BigInteger.valueOf(3), BigInteger.valueOf(10));     // 7 (any modulus, not only primes)
+NumberTheory.crt(new BigInteger[]{BigInteger.TWO, BigInteger.valueOf(3)},
+                 new BigInteger[]{BigInteger.valueOf(3), BigInteger.valueOf(5)});   // x = 8 (mod 15)
+
+NumberTheory.factorizationString(BigInteger.valueOf(600));                  // "2^3 * 3 * 5^2"
+NumberTheory.factorize(new BigInteger("1000000007").multiply(new BigInteger("998244353")));
+NumberTheory.eulerPhi(BigInteger.valueOf(36));                              // 12
+NumberTheory.multiplicativeOrder(BigInteger.TEN, BigInteger.valueOf(7));    // 6 (the period of 1/7)
+NumberTheory.primitiveRoot(BigInteger.valueOf(41));                         // 6
+
+NumberTheory.fareySequence(5);                                              // 0, 1/5, 1/4, 1/3, 2/5, 1/2, ...
+NumberTheory.sternBrocotPath(Rational.of(5, 3));                            // "RLR"
+NumberTheory.pell(BigInteger.valueOf(61));                                  // {1766319049, 226153980}
+
+NumberTheory.bernoulli(12);                                                 // -691/2730
+NumberTheory.harmonic(10);                                                  // 7381/2520
+NumberTheory.sumOfPowers(3, BigInteger.valueOf(100));                       // 25502500
+```
+
+| Group | Methods |
+|---|---|
+| gcd and inverses | `extendedGcd(a, b)`, `modInverse(a, m)`, `gcd` / `lcm` of integers or rationals (also with any number of arguments) |
+| Congruences | `crt(residues, moduli)`; the moduli need not be coprime, and an inconsistent system throws `ArithmeticException` |
+| Primes | `isPrime` (exact below about 3.3e24, a 64-round probable-prime test above that), `nextPrime` |
+| Factorisation | `factorize(n)` (map of prime to exponent, increasing), `factorizationString(n)`; trial division, then Pollard-Brent rho |
+| Arithmetic functions | `eulerPhi`, `divisorCount`, `divisorSum(n, k)`, `mobius`, `radical`, `divisors`, `carmichaelLambda` |
+| Orders and roots | `multiplicativeOrder(a, m)`, `primitiveRoot(p)` |
+| Farey and Stern-Brocot | `fareySequence(n)`, `fareyNeighbours(r, n)`, `mediant`, `areFareyNeighbours`, `sternBrocotPath(r)`, `fromSternBrocotPath(path)` |
+| Pell equations | `pell(n)` (fundamental solution of x^2 - n y^2 = 1), `sqrtContinuedFraction(n)` |
+| Exact series | `bernoulli(n)` (B1 = -1/2), `harmonic(n)`, `sumOfPowers(k, n)` (Faulhaber) |
+
+Limits: `factorize` is quick when the second-smallest prime factor is below about 12 digits and can take minutes to hours when n has two prime factors of 17 digits or more (2^128+1 did not finish in several minutes); `fareySequence` is limited to n of 20000; `bernoulli` and `sumOfPowers` are limited to index 20000; `sternBrocotPath` refuses paths longer than ten million steps.
+
 ### API summary
 
 **Static arithmetic**
@@ -314,7 +356,7 @@ For the nth root of `x` kept to `k` decimal places, `floor(root(x) * 10^k)` equa
 
 ## Testing
 
-The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. In total over 320,000 checks ran with no differences.
+The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. The number-theory class was checked against brute-force definitions (totient, divisor functions, Moebius, Carmichael lambda, multiplicative order, Farey sequences and neighbours, Pell minimality, the Bernoulli recurrence, von Staudt-Clausen denominators, sums of powers). In total over 1,000,000 checks ran with no differences.
 
 ## License
 

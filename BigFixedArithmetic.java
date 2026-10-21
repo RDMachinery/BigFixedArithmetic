@@ -41,6 +41,12 @@ import java.util.function.Consumer;
  * output, bounded-precision arithmetic through {@link Rational.Context}, and
  * square roots, nth roots and powers (including fractional exponents) that are
  * correctly rounded to a chosen precision.
+ *
+ * <h2>{@link NumberTheory}</h2>
+ * Extended gcd, modular inverses, the Chinese remainder theorem, primality and
+ * factorisation, arithmetic functions, multiplicative order and primitive roots,
+ * Farey sequences, Stern-Brocot paths, Pell equations, and exact Bernoulli
+ * numbers, harmonic numbers and sums of powers.
  */
 public class BigFixedArithmetic {
 
@@ -1921,6 +1927,832 @@ public class BigFixedArithmetic {
                 sb.append(term);
             }
             return sb.toString();
+        }
+    }
+
+    // ── Number theory ────────────────────────────────────────────────────────
+
+    /**
+     * Number-theory tools: extended gcd, modular inverses, the Chinese
+     * remainder theorem, primality and factorisation, arithmetic functions
+     * (phi, mu, sigma, tau, lambda), multiplicative order and primitive roots,
+     * Farey sequences and Stern-Brocot paths, Pell equations, and exact
+     * Bernoulli numbers, harmonic numbers and sums of powers.
+     *
+     * <p>Unlike the long-hand routines above, this class uses BigInteger's own
+     * multiply, divide, mod and gcd, because factorisation and modular
+     * exponentiation are only practical with fast arithmetic.  Results that are
+     * fractions are returned as {@link Rational}.
+     */
+    public static final class NumberTheory {
+        private static final BigInteger Z = BigInteger.ZERO;
+        private static final BigInteger O = BigInteger.ONE;
+        private static final BigInteger TWO = BigInteger.valueOf(2);
+
+        private NumberTheory() {
+        }
+
+        private static BigInteger big(long v) {
+            return BigInteger.valueOf(v);
+        }
+
+        private static void requirePositive(BigInteger n, String what) {
+            if (n.signum() <= 0) {
+                throw new ArithmeticException(what + " must be positive");
+            }
+        }
+
+        // ── gcd family ───────────────────────────────────────────────────────
+
+        /** Result of {@link #extendedGcd}: g = gcd(a, b) = a*x + b*y, with g >= 0. */
+        public static final class Bezout {
+            public final BigInteger g;
+            public final BigInteger x;
+            public final BigInteger y;
+
+            Bezout(BigInteger g, BigInteger x, BigInteger y) {
+                this.g = g;
+                this.x = x;
+                this.y = y;
+            }
+
+            @Override
+            public String toString() {
+                return "gcd=" + g + ", x=" + x + ", y=" + y;
+            }
+        }
+
+        /**
+         * Extended Euclidean algorithm.  Returns g = gcd(a, b) >= 0 and
+         * coefficients x, y with a*x + b*y = g.  The coefficients are the
+         * minimal ones the algorithm produces, so |x| &lt;= |b|/(2g) and
+         * |y| &lt;= |a|/(2g) when both are non-zero.
+         */
+        public static Bezout extendedGcd(BigInteger a, BigInteger b) {
+            BigInteger oldR = a, r = b;
+            BigInteger oldS = O, s = Z;
+            BigInteger oldT = Z, t = O;
+            while (r.signum() != 0) {
+                BigInteger[] qr = oldR.divideAndRemainder(r);
+                BigInteger q = qr[0];
+                BigInteger tmp = oldR.subtract(q.multiply(r));
+                oldR = r;
+                r = tmp;
+                tmp = oldS.subtract(q.multiply(s));
+                oldS = s;
+                s = tmp;
+                tmp = oldT.subtract(q.multiply(t));
+                oldT = t;
+                t = tmp;
+            }
+            if (oldR.signum() < 0) {
+                oldR = oldR.negate();
+                oldS = oldS.negate();
+                oldT = oldT.negate();
+            }
+            return new Bezout(oldR, oldS, oldT);
+        }
+
+        /**
+         * The inverse of a modulo m, for any modulus m &gt;= 1 (not only primes),
+         * in the range [0, m).
+         *
+         * @throws ArithmeticException if gcd(a, m) is not 1
+         */
+        public static BigInteger modInverse(BigInteger a, BigInteger m) {
+            requirePositive(m, "Modulus");
+            Bezout e = extendedGcd(a.mod(m), m);
+            if (!e.g.equals(O)) {
+                throw new ArithmeticException(a + " has no inverse modulo " + m);
+            }
+            return e.x.mod(m);
+        }
+
+        /** Greatest common divisor of rationals: gcd(numerators) / lcm(denominators). */
+        public static Rational gcd(Rational a, Rational b) {
+            BigInteger g = a.num.gcd(b.num);
+            BigInteger l = lcm(a.den, b.den);
+            return Rational.of(g, l);
+        }
+
+        /** Least common multiple of rationals: lcm(numerators) / gcd(denominators). */
+        public static Rational lcm(Rational a, Rational b) {
+            if (a.num.signum() == 0 || b.num.signum() == 0) {
+                return Rational.ZERO;
+            }
+            return Rational.of(lcm(a.num, b.num), a.den.gcd(b.den));
+        }
+
+        /** gcd of any number of rationals (zero for none). */
+        public static Rational gcd(Rational... values) {
+            Rational g = Rational.ZERO;
+            for (Rational v : values) {
+                g = gcd(g, v);
+            }
+            return g;
+        }
+
+        /** lcm of any number of rationals (one for none). */
+        public static Rational lcm(Rational... values) {
+            Rational l = Rational.ONE;
+            for (Rational v : values) {
+                l = lcm(l, v);
+            }
+            return l;
+        }
+
+        /** Non-negative least common multiple of two integers (0 if either is 0). */
+        public static BigInteger lcm(BigInteger a, BigInteger b) {
+            if (a.signum() == 0 || b.signum() == 0) {
+                return Z;
+            }
+            return a.divide(a.gcd(b)).multiply(b).abs();
+        }
+
+        // ── Chinese remainder theorem ────────────────────────────────────────
+
+        /** A congruence x = residue (mod modulus), with 0 &lt;= residue &lt; modulus. */
+        public static final class Congruence {
+            public final BigInteger residue;
+            public final BigInteger modulus;
+
+            Congruence(BigInteger residue, BigInteger modulus) {
+                this.residue = residue;
+                this.modulus = modulus;
+            }
+
+            @Override
+            public String toString() {
+                return "x = " + residue + " (mod " + modulus + ")";
+            }
+        }
+
+        /**
+         * Solves the system x = residues[i] (mod moduli[i]).  The moduli need not
+         * be coprime.  The result is the unique solution modulo lcm(moduli).
+         *
+         * @throws ArithmeticException if the system has no solution, a modulus is
+         *         not positive, or the arrays differ in length or are empty
+         */
+        public static Congruence crt(BigInteger[] residues, BigInteger[] moduli) {
+            if (residues.length != moduli.length || residues.length == 0) {
+                throw new ArithmeticException("Need the same non-zero number of residues and moduli");
+            }
+            BigInteger r1 = Z;
+            BigInteger m1 = O;
+            for (int i = 0; i < residues.length; i++) {
+                requirePositive(moduli[i], "Modulus");
+                BigInteger r2 = residues[i].mod(moduli[i]);
+                BigInteger m2 = moduli[i];
+                Bezout e = extendedGcd(m1, m2);
+                BigInteger diff = r2.subtract(r1);
+                if (diff.mod(e.g).signum() != 0) {
+                    throw new ArithmeticException("The congruences are inconsistent");
+                }
+                BigInteger m2g = m2.divide(e.g);
+                BigInteger k = diff.divide(e.g).multiply(e.x).mod(m2g);
+                BigInteger lcm = m1.multiply(m2g);
+                r1 = r1.add(m1.multiply(k)).mod(lcm);
+                m1 = lcm;
+            }
+            return new Congruence(r1, m1);
+        }
+
+        // ── primality and factorisation ──────────────────────────────────────
+
+        private static final int[] SMALL_PRIMES = {2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41};
+
+        /**
+         * Primality test.  Exact for n below about 3.3e24 (Miller-Rabin with the
+         * first 13 prime bases is a proof there); above that it is a strong
+         * probable-prime test with 64 rounds, whose error is negligible.
+         */
+        public static boolean isPrime(BigInteger n) {
+            if (n.compareTo(TWO) < 0) {
+                return false;
+            }
+            for (int p : SMALL_PRIMES) {
+                BigInteger bp = big(p);
+                if (n.equals(bp)) {
+                    return true;
+                }
+                if (n.mod(bp).signum() == 0) {
+                    return false;
+                }
+            }
+            if (n.bitLength() > 81) {
+                return n.isProbablePrime(64);
+            }
+            BigInteger nm1 = n.subtract(O);
+            int s = nm1.getLowestSetBit();
+            BigInteger d = nm1.shiftRight(s);
+            for (int p : SMALL_PRIMES) {
+                BigInteger x = big(p).modPow(d, n);
+                if (x.equals(O) || x.equals(nm1)) {
+                    continue;
+                }
+                boolean composite = true;
+                for (int i = 1; i < s; i++) {
+                    x = x.multiply(x).mod(n);
+                    if (x.equals(nm1)) {
+                        composite = false;
+                        break;
+                    }
+                }
+                if (composite) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /** Smallest prime strictly greater than n. */
+        public static BigInteger nextPrime(BigInteger n) {
+            BigInteger c = n.compareTo(TWO) < 0 ? TWO : n.add(O);
+            while (!isPrime(c)) {
+                c = c.add(O);
+            }
+            return c;
+        }
+
+        private static BigInteger pollardBrent(BigInteger n) {
+            if (!n.testBit(0)) {
+                return TWO;
+            }
+            for (long cc = 1; ; cc++) {
+                BigInteger c = big(cc);
+                BigInteger y = TWO, x = TWO, ys = TWO, q = O, g = O;
+                int r = 1;
+                final int m = 128;
+                do {
+                    x = y;
+                    for (int i = 0; i < r; i++) {
+                        y = y.multiply(y).add(c).mod(n);
+                    }
+                    int k = 0;
+                    do {
+                        ys = y;
+                        int lim = Math.min(m, r - k);
+                        for (int i = 0; i < lim; i++) {
+                            y = y.multiply(y).add(c).mod(n);
+                            q = q.multiply(x.subtract(y).abs()).mod(n);
+                        }
+                        g = q.gcd(n);
+                        k += m;
+                    } while (k < r && g.equals(O));
+                    r <<= 1;
+                } while (g.equals(O));
+                if (g.equals(n)) {
+                    do {
+                        ys = ys.multiply(ys).add(c).mod(n);
+                        g = x.subtract(ys).abs().gcd(n);
+                    } while (g.equals(O));
+                }
+                if (!g.equals(n)) {
+                    return g;
+                }
+            }
+        }
+
+        private static void factorInto(BigInteger n, java.util.Map<BigInteger, Integer> out) {
+            if (n.equals(O)) {
+                return;
+            }
+            if (isPrime(n)) {
+                out.merge(n, 1, Integer::sum);
+                return;
+            }
+            BigInteger root = n.sqrt();
+            if (root.multiply(root).equals(n)) {
+                java.util.Map<BigInteger, Integer> inner = new java.util.TreeMap<>();
+                factorInto(root, inner);
+                for (java.util.Map.Entry<BigInteger, Integer> e : inner.entrySet()) {
+                    out.merge(e.getKey(), 2 * e.getValue(), Integer::sum);
+                }
+                return;
+            }
+            BigInteger d = pollardBrent(n);
+            factorInto(d, out);
+            factorInto(n.divide(d), out);
+        }
+
+        /**
+         * Prime factorisation of n >= 1 as a map prime to exponent, in increasing
+         * prime order (empty for 1).  Uses trial division by small primes, then
+         * Pollard-Brent rho with a primality test.  Numbers with two large prime
+         * factors (17 digits or more each) can take minutes to hours.
+         *
+         * @throws ArithmeticException if n is not positive
+         */
+        public static java.util.Map<BigInteger, Integer> factorize(BigInteger n) {
+            requirePositive(n, "Number to factor");
+            java.util.Map<BigInteger, Integer> out = new java.util.TreeMap<>();
+            BigInteger rest = n;
+            for (int p = 2; p < 1000 && rest.bitLength() > 1; p++) {
+                BigInteger bp = big(p);
+                while (rest.mod(bp).signum() == 0) {
+                    out.merge(bp, 1, Integer::sum);
+                    rest = rest.divide(bp);
+                }
+            }
+            factorInto(rest, out);
+            return out;
+        }
+
+        /** Formats a factorisation as "2^3 * 3 * 5^2". */
+        public static String factorizationString(BigInteger n) {
+            if (n.equals(O)) {
+                return "1";
+            }
+            StringBuilder sb = new StringBuilder();
+            for (java.util.Map.Entry<BigInteger, Integer> e : factorize(n).entrySet()) {
+                if (sb.length() > 0) {
+                    sb.append(" * ");
+                }
+                sb.append(e.getKey());
+                if (e.getValue() > 1) {
+                    sb.append('^').append(e.getValue());
+                }
+            }
+            return sb.toString();
+        }
+
+        // ── arithmetic functions ─────────────────────────────────────────────
+
+        /** Euler's totient: the count of 1 &lt;= k &lt;= n with gcd(k, n) = 1. */
+        public static BigInteger eulerPhi(BigInteger n) {
+            BigInteger result = O;
+            for (java.util.Map.Entry<BigInteger, Integer> e : factorize(n).entrySet()) {
+                BigInteger p = e.getKey();
+                result = result.multiply(p.subtract(O)).multiply(p.pow(e.getValue() - 1));
+            }
+            return result;
+        }
+
+        /** Number of positive divisors of n. */
+        public static BigInteger divisorCount(BigInteger n) {
+            BigInteger result = O;
+            for (int e : factorize(n).values()) {
+                result = result.multiply(big(e + 1L));
+            }
+            return result;
+        }
+
+        /** Sum of the k-th powers of the positive divisors of n (k = 1 gives sigma(n)). */
+        public static BigInteger divisorSum(BigInteger n, int k) {
+            if (k < 0) {
+                throw new IllegalArgumentException("k must be non-negative");
+            }
+            BigInteger result = O;
+            for (java.util.Map.Entry<BigInteger, Integer> e : factorize(n).entrySet()) {
+                BigInteger pk = e.getKey().pow(k);
+                BigInteger term = O;
+                BigInteger power = O;
+                for (int i = 1; i <= e.getValue(); i++) {
+                    power = power.multiply(pk);
+                    term = term.add(power);
+                }
+                result = result.multiply(term);
+            }
+            return result;
+        }
+
+        /** The Moebius function: 0 if n has a squared factor, else (-1)^(number of primes). */
+        public static int mobius(BigInteger n) {
+            int sign = 1;
+            for (int e : factorize(n).values()) {
+                if (e > 1) {
+                    return 0;
+                }
+                sign = -sign;
+            }
+            return sign;
+        }
+
+        /** Product of the distinct primes of n. */
+        public static BigInteger radical(BigInteger n) {
+            BigInteger result = O;
+            for (BigInteger p : factorize(n).keySet()) {
+                result = result.multiply(p);
+            }
+            return result;
+        }
+
+        /** All positive divisors of n in increasing order. */
+        public static List<BigInteger> divisors(BigInteger n) {
+            List<BigInteger> result = new ArrayList<>();
+            result.add(O);
+            for (java.util.Map.Entry<BigInteger, Integer> e : factorize(n).entrySet()) {
+                int size = result.size();
+                BigInteger power = O;
+                for (int i = 1; i <= e.getValue(); i++) {
+                    power = power.multiply(e.getKey());
+                    for (int j = 0; j < size; j++) {
+                        result.add(result.get(j).multiply(power));
+                    }
+                }
+            }
+            Collections.sort(result);
+            return result;
+        }
+
+        private static void mergeMax(java.util.Map<BigInteger, Integer> into, java.util.Map<BigInteger, Integer> from) {
+            for (java.util.Map.Entry<BigInteger, Integer> e : from.entrySet()) {
+                into.merge(e.getKey(), e.getValue(), Math::max);
+            }
+        }
+
+        /** Factorisation of Carmichael's lambda(n), the exponent of the group of units mod n. */
+        private static java.util.Map<BigInteger, Integer> lambdaFactors(BigInteger n) {
+            java.util.Map<BigInteger, Integer> lam = new java.util.TreeMap<>();
+            for (java.util.Map.Entry<BigInteger, Integer> e : factorize(n).entrySet()) {
+                BigInteger p = e.getKey();
+                int k = e.getValue();
+                if (p.equals(TWO)) {
+                    if (k == 2) {
+                        mergeMax(lam, java.util.Collections.singletonMap(TWO, 1));
+                    } else if (k >= 3) {
+                        mergeMax(lam, java.util.Collections.singletonMap(TWO, k - 2));
+                    }
+                } else {
+                    mergeMax(lam, factorize(p.subtract(O)));
+                    if (k > 1) {
+                        mergeMax(lam, java.util.Collections.singletonMap(p, k - 1));
+                    }
+                }
+            }
+            return lam;
+        }
+
+        /** Carmichael's lambda: the smallest L with a^L = 1 (mod n) for all a coprime to n. */
+        public static BigInteger carmichaelLambda(BigInteger n) {
+            BigInteger result = O;
+            for (java.util.Map.Entry<BigInteger, Integer> e : lambdaFactors(n).entrySet()) {
+                result = result.multiply(e.getKey().pow(e.getValue()));
+            }
+            return result;
+        }
+
+        // ── orders and primitive roots ───────────────────────────────────────
+
+        /**
+         * The multiplicative order of a modulo m: the least k &gt;= 1 with
+         * a^k = 1 (mod m).  The order of any a modulo 1 is 1.
+         *
+         * @throws ArithmeticException if gcd(a, m) is not 1
+         */
+        public static BigInteger multiplicativeOrder(BigInteger a, BigInteger m) {
+            requirePositive(m, "Modulus");
+            if (m.equals(O)) {
+                return O;
+            }
+            if (!a.gcd(m).equals(O)) {
+                throw new ArithmeticException(a + " is not coprime to " + m);
+            }
+            java.util.Map<BigInteger, Integer> lam = lambdaFactors(m);
+            BigInteger order = O;
+            for (java.util.Map.Entry<BigInteger, Integer> e : lam.entrySet()) {
+                order = order.multiply(e.getKey().pow(e.getValue()));
+            }
+            for (BigInteger q : lam.keySet()) {
+                while (order.mod(q).signum() == 0 && a.modPow(order.divide(q), m).equals(O)) {
+                    order = order.divide(q);
+                }
+            }
+            return order;
+        }
+
+        /**
+         * The smallest primitive root of the prime p: a generator of the units
+         * modulo p.
+         *
+         * @throws ArithmeticException if p is not prime
+         */
+        public static BigInteger primitiveRoot(BigInteger p) {
+            if (!isPrime(p)) {
+                throw new ArithmeticException(p + " is not prime");
+            }
+            if (p.equals(TWO)) {
+                return O;
+            }
+            BigInteger phi = p.subtract(O);
+            Iterable<BigInteger> primes = factorize(phi).keySet();
+            for (BigInteger g = TWO; ; g = g.add(O)) {
+                boolean ok = true;
+                for (BigInteger q : primes) {
+                    if (g.modPow(phi.divide(q), p).equals(O)) {
+                        ok = false;
+                        break;
+                    }
+                }
+                if (ok) {
+                    return g;
+                }
+            }
+        }
+
+        // ── Farey sequences and the Stern-Brocot tree ────────────────────────
+
+        /** The mediant (a.num + b.num) / (a.den + b.den), which lies between a and b. */
+        public static Rational mediant(Rational a, Rational b) {
+            return Rational.of(a.num.add(b.num), a.den.add(b.den));
+        }
+
+        /** True when a and b are neighbours in some Farey sequence: |a.num*b.den - b.num*a.den| = 1. */
+        public static boolean areFareyNeighbours(Rational a, Rational b) {
+            return a.num.multiply(b.den).subtract(b.num.multiply(a.den)).abs().equals(O);
+        }
+
+        /**
+         * The Farey sequence F_n: every fraction in [0, 1] in lowest terms with
+         * denominator at most n, in increasing order.  It has about 3n^2/pi^2
+         * terms, so n is limited to 20000.
+         */
+        public static List<Rational> fareySequence(int n) {
+            if (n < 1 || n > 20000) {
+                throw new IllegalArgumentException("n must be from 1 to 20000");
+            }
+            List<Rational> out = new ArrayList<>();
+            long a = 0, b = 1, c = 1, d = n;
+            out.add(Rational.of(a, b));
+            while (c <= n) {
+                long k = (n + b) / d;
+                long na = c, nb = d;
+                c = k * c - a;
+                d = k * d - b;
+                a = na;
+                b = nb;
+                out.add(Rational.of(a, b));
+                if (a == 1 && b == 1) {
+                    break;
+                }
+            }
+            return out;
+        }
+
+        /**
+         * The two neighbours of r in the Farey sequence of order n, extended to
+         * all rationals: the largest fraction strictly below r and the smallest
+         * strictly above r whose denominators are at most n.  Returns
+         * {below, above}.
+         */
+        public static Rational[] fareyNeighbours(Rational r, long n) {
+            if (n < 1) {
+                throw new IllegalArgumentException("n must be at least 1");
+            }
+            BigInteger bn = big(n);
+            BigInteger p = r.num;
+            BigInteger q = r.den;
+            if (q.compareTo(bn) <= 0) {
+                // r itself is in F_n: solve p*b - a*q = 1 and c*q - p*d = 1 with b, d <= n as large as possible.
+                BigInteger inv = q.equals(O) ? Z : p.mod(q).modInverse(q);
+                BigInteger b = inv.add(q.multiply(bn.subtract(inv).divide(q)));
+                BigInteger a = p.multiply(b).subtract(O).divide(q);
+                BigInteger d0 = q.subtract(inv).mod(q);
+                BigInteger d = d0.add(q.multiply(bn.subtract(d0).divide(q)));
+                BigInteger c = O.add(p.multiply(d)).divide(q);
+                return new Rational[] {Rational.of(a, b), Rational.of(c, d)};
+            }
+            BigInteger fl = r.floor();
+            BigInteger loN = fl, loD = O, hiN = fl.add(O), hiD = O;
+            while (true) {
+                boolean changed = false;
+                BigInteger bb = p.multiply(loD).subtract(loN.multiply(q));
+                BigInteger aa = hiN.multiply(q).subtract(p.multiply(hiD));
+                BigInteger k = bb.subtract(O).divide(aa).min(bn.subtract(loD).divide(hiD));
+                if (k.signum() > 0) {
+                    loN = loN.add(k.multiply(hiN));
+                    loD = loD.add(k.multiply(hiD));
+                    changed = true;
+                }
+                bb = p.multiply(loD).subtract(loN.multiply(q));
+                aa = hiN.multiply(q).subtract(p.multiply(hiD));
+                k = aa.subtract(O).divide(bb).min(bn.subtract(hiD).divide(loD));
+                if (k.signum() > 0) {
+                    hiN = hiN.add(k.multiply(loN));
+                    hiD = hiD.add(k.multiply(loD));
+                    changed = true;
+                }
+                if (!changed) {
+                    break;
+                }
+            }
+            return new Rational[] {Rational.of(loN, loD), Rational.of(hiN, hiD)};
+        }
+
+        /** Longest path string {@link #sternBrocotPath} will build. */
+        private static final long MAX_PATH = 10_000_000L;
+
+        /**
+         * The path from the root 1/1 of the Stern-Brocot tree to the positive
+         * rational r, as a string of 'L' (go to the smaller side) and 'R'
+         * (the larger side).  The root is the empty string; 3/2 is "RL".
+         *
+         * @throws ArithmeticException if r is not positive, or the path would
+         *         be longer than ten million steps (for example 10000000000/1)
+         */
+        public static String sternBrocotPath(Rational r) {
+            if (r.signum() <= 0) {
+                throw new ArithmeticException("Only positive rationals are in the Stern-Brocot tree");
+            }
+            BigInteger a = r.num, b = r.den;
+            StringBuilder sb = new StringBuilder();
+            while (!a.equals(b)) {
+                boolean right = a.compareTo(b) > 0;
+                BigInteger big = right ? a : b;
+                BigInteger small = right ? b : a;
+                BigInteger k = big.subtract(O).divide(small);
+                if (k.add(big(sb.length())).compareTo(big(MAX_PATH)) > 0) {
+                    throw new ArithmeticException("Stern-Brocot path is too long");
+                }
+                int count = k.intValue();
+                char ch = right ? 'R' : 'L';
+                for (int i = 0; i < count; i++) {
+                    sb.append(ch);
+                }
+                if (right) {
+                    a = a.subtract(k.multiply(b));
+                } else {
+                    b = b.subtract(k.multiply(a));
+                }
+            }
+            return sb.toString();
+        }
+
+        /** The rational at the end of a Stern-Brocot path of 'L' and 'R' characters (inverse of {@link #sternBrocotPath}). */
+        public static Rational fromSternBrocotPath(String path) {
+            // Keep the bracketing fractions lo = ln/ld and hi = hn/hd; start with 0/1 and 1/0.
+            BigInteger ln = Z, ld = O, hn = O, hd = Z;
+            BigInteger mn = O, md = O;
+            for (int i = 0; i < path.length(); i++) {
+                char ch = path.charAt(i);
+                if (ch == 'L') {
+                    hn = mn;
+                    hd = md;
+                } else if (ch == 'R') {
+                    ln = mn;
+                    ld = md;
+                } else {
+                    throw new IllegalArgumentException("Path may contain only L and R");
+                }
+                mn = ln.add(hn);
+                md = ld.add(hd);
+            }
+            return Rational.of(mn, md);
+        }
+
+        // ── Pell equations ───────────────────────────────────────────────────
+
+        /**
+         * The continued fraction of sqrt(n) for a non-square n: element 0 is the
+         * integer part and the rest is the repeating period.
+         */
+        public static List<BigInteger> sqrtContinuedFraction(BigInteger n) {
+            requirePositive(n, "n");
+            BigInteger a0 = n.sqrt();
+            if (a0.multiply(a0).equals(n)) {
+                throw new ArithmeticException(n + " is a perfect square");
+            }
+            List<BigInteger> out = new ArrayList<>();
+            out.add(a0);
+            BigInteger m = Z, d = O, a = a0;
+            while (!a.equals(a0.shiftLeft(1))) {
+                m = d.multiply(a).subtract(m);
+                d = n.subtract(m.multiply(m)).divide(d);
+                a = a0.add(m).divide(d);
+                out.add(a);
+            }
+            return out;
+        }
+
+        /**
+         * The fundamental solution {x, y} (smallest positive y) of the Pell
+         * equation x^2 - n*y^2 = 1, for a positive non-square n.  Solutions can
+         * be enormous: n = 61 gives x = 1766319049.
+         */
+        public static BigInteger[] pell(BigInteger n) {
+            List<BigInteger> cf = sqrtContinuedFraction(n);
+            int period = cf.size() - 1;
+            // Convergent h/k at the end of the first period (or the second, if the period is odd).
+            int terms = (period % 2 == 0) ? period : 2 * period;
+            BigInteger h1 = O, h0 = cf.get(0);
+            BigInteger k1 = Z, k0 = O;
+            for (int i = 1; i <= terms - 1; i++) {
+                BigInteger a = cf.get(1 + (i - 1) % period);
+                BigInteger h = a.multiply(h0).add(h1);
+                BigInteger k = a.multiply(k0).add(k1);
+                h1 = h0;
+                h0 = h;
+                k1 = k0;
+                k0 = k;
+            }
+            return new BigInteger[] {h0, k0};
+        }
+
+        // ── Bernoulli numbers, harmonic numbers, sums of powers ──────────────
+
+        private static final int MAX_BERNOULLI = 20000;
+
+        /**
+         * The Bernoulli number B_n as an exact fraction, with the convention
+         * B_1 = -1/2.  B_n is zero for odd n above 1.  Computed from the tangent
+         * numbers with integer arithmetic only; n is limited to 20000.
+         */
+        public static Rational bernoulli(int n) {
+            if (n < 0 || n > MAX_BERNOULLI) {
+                throw new IllegalArgumentException("n must be from 0 to " + MAX_BERNOULLI);
+            }
+            if (n == 0) {
+                return Rational.ONE;
+            }
+            if (n == 1) {
+                return Rational.of(-1, 2);
+            }
+            if ((n & 1) == 1) {
+                return Rational.ZERO;
+            }
+            int k = n / 2;
+            BigInteger[] t = new BigInteger[k + 1];
+            t[1] = O;
+            for (int i = 2; i <= k; i++) {
+                t[i] = t[i - 1].multiply(big(i - 1L));
+            }
+            for (int i = 2; i <= k; i++) {
+                for (int j = i; j <= k; j++) {
+                    t[j] = t[j - 1].multiply(big(j - i)).add(t[j].multiply(big(j - i + 2L)));
+                }
+            }
+            BigInteger pow = O.shiftLeft(n);
+            BigInteger num = t[k].multiply(big(n));
+            BigInteger den = pow.multiply(pow.subtract(O));
+            return Rational.of((k & 1) == 1 ? num : num.negate(), den);
+        }
+
+        /** The harmonic number H_n = 1 + 1/2 + ... + 1/n as an exact fraction (n &gt;= 0). */
+        public static Rational harmonic(int n) {
+            if (n < 0) {
+                throw new IllegalArgumentException("n must be non-negative");
+            }
+            if (n == 0) {
+                return Rational.ZERO;
+            }
+            BigInteger[] pq = harmonicRange(1, n + 1);
+            return Rational.of(pq[0], pq[1]);
+        }
+
+        /** Sum of 1/i for lo &lt;= i &lt; hi, by binary splitting, as {numerator, denominator}. */
+        private static BigInteger[] harmonicRange(int lo, int hi) {
+            if (hi - lo == 1) {
+                return new BigInteger[] {O, big(lo)};
+            }
+            int mid = (lo + hi) >>> 1;
+            BigInteger[] a = harmonicRange(lo, mid);
+            BigInteger[] b = harmonicRange(mid, hi);
+            return new BigInteger[] {a[0].multiply(b[1]).add(b[0].multiply(a[1])), a[1].multiply(b[1])};
+        }
+
+        /**
+         * The exact sum 1^k + 2^k + ... + n^k (Faulhaber's formula, using Bernoulli
+         * numbers).  k and n are non-negative; k is limited to 20000.
+         */
+        public static BigInteger sumOfPowers(int k, BigInteger n) {
+            if (k < 0 || n.signum() < 0) {
+                throw new IllegalArgumentException("k and n must be non-negative");
+            }
+            if (k > MAX_BERNOULLI) {
+                throw new IllegalArgumentException("k is too large");
+            }
+            // S = 1/(k+1) * sum_{j=0}^{k} C(k+1, j) * B_j(+) * n^(k+1-j), with B_1(+) = +1/2.
+            // Work with a common denominator by scaling each Bernoulli number.
+            BigInteger totalNum = Z;
+            BigInteger totalDen = O;
+            BigInteger binom = O;   // C(k+1, j)
+            for (int j = 0; j <= k; j++) {
+                if (j > 0) {
+                    binom = binom.multiply(big(k + 2L - j)).divide(big(j));
+                }
+                Rational b = bernoulli(j);
+                if (j == 1) {
+                    b = Rational.of(1, 2);
+                }
+                if (b.num.signum() == 0) {
+                    continue;
+                }
+                BigInteger termNum = binom.multiply(b.num).multiply(n.pow(k + 1 - j));
+                BigInteger termDen = b.den;
+                totalNum = totalNum.multiply(termDen).add(termNum.multiply(totalDen));
+                totalDen = totalDen.multiply(termDen);
+                BigInteger g = totalNum.gcd(totalDen);
+                if (g.signum() != 0 && !g.equals(O)) {
+                    totalNum = totalNum.divide(g);
+                    totalDen = totalDen.divide(g);
+                }
+            }
+            Rational result = Rational.of(totalNum, totalDen.multiply(big(k + 1L)));
+            if (!result.den.equals(O)) {
+                throw new IllegalStateException("Sum of powers was not an integer");
+            }
+            return result.num;
         }
     }
 
