@@ -16,9 +16,10 @@ import java.util.function.Consumer;
  * shift-and-subtract long division.
  *
  * <h2>Numbers from strings</h2>
- * {@link #parseDecimal(String)} reads a decimal string exactly.  A decimal such
- * as "-12.375" is held as an unscaled integer plus a scale (-12375 and 3), so
- * no precision is lost on input.
+ * {@link #parseDecimal(String)} reads a decimal string exactly, including
+ * scientific notation ("1.5e3", "2E-4").  A decimal such as "-12.375" is held
+ * as an unscaled integer plus a scale (-12375 and 3), so no precision is lost
+ * on input.
  *
  * <h2>Division</h2>
  * <ul>
@@ -32,17 +33,26 @@ import java.util.function.Consumer;
  * Both modes work in any base from 2 to 36.
  *
  * <h2>{@link Rational}</h2>
- * An exact fraction type (BigInteger numerator and denominator in lowest
- * terms) with arithmetic, exact comparison, floor/ceiling/rounding, parsing of
- * fractions, mixed numbers and repeating decimals, repeating-cycle analysis,
- * expansion in any base, continued fractions, best approximations, and
- * mixed-number and Egyptian-fraction formatting.
+ * An exact fraction type, and a {@link Number} subclass, with arithmetic,
+ * exact comparison, floor/ceiling/rounding, parsing of fractions, mixed
+ * numbers, repeating decimals and scientific notation, repeating-cycle
+ * analysis, expansion in any base, continued fractions, best approximations,
+ * mixed-number and Egyptian-fraction formatting, scientific and engineering
+ * output, bounded-precision arithmetic through {@link Rational.Context}, and
+ * square roots, nth roots and powers (including fractional exponents) that are
+ * correctly rounded to a chosen precision.
  */
 public class BigFixedArithmetic {
 
     private static final BigInteger ZERO = BigInteger.ZERO;
     private static final BigInteger ONE  = BigInteger.ONE;
     private static final BigInteger TEN  = BigInteger.valueOf(10);
+
+    /**
+     * Largest exponent accepted in scientific notation, in either direction.
+     * Numbers are held as full integers, so 1e100000 would need 100000 digits.
+     */
+    public static final int MAX_EXPONENT = 10_000;
 
     // ── Addition & Subtraction ───────────────────────────────────────────────
 
@@ -94,10 +104,13 @@ public class BigFixedArithmetic {
     // ── String Parsing ───────────────────────────────────────────────────────
 
     /**
-     * An exact decimal number: value = unscaled / 10^scale.
-     * For example "-12.375" is unscaled = -12375, scale = 3.
+     * An exact decimal number: value = unscaled / 10^scale (scale is never
+     * negative).  For example "-12.375" is unscaled = -12375, scale = 3.
+     * A {@link Number}, so it converts to int, long, float and double.
      */
-    public static final class Decimal {
+    public static final class Decimal extends Number {
+        private static final long serialVersionUID = 1L;
+
         public final BigInteger unscaled;
         public final int scale;
 
@@ -120,22 +133,48 @@ public class BigFixedArithmetic {
             }
             return (unscaled.signum() < 0 ? "-" : "") + digits;
         }
+
+        /** Scientific notation with the fewest digits, e.g. "-1.2375E+1" ("0E+0" for zero). */
+        public String toScientificString() {
+            return scientific(false);
+        }
+
+        /** Engineering notation (exponent a multiple of 3), e.g. "12.375E+0". */
+        public String toEngineeringString() {
+            return scientific(true);
+        }
+
+        private String scientific(boolean engineering) {
+            if (unscaled.signum() == 0) {
+                return "0E+0";
+            }
+            String full = unscaled.abs().toString();
+            return formatScientific(unscaled.signum() < 0 ? "-" : "", stripTrailingZeros(full),
+                                    (long) full.length() - 1 - scale, engineering);
+        }
+
+        @Override public int intValue()       { return Rational.of(this).intValue(); }
+        @Override public long longValue()     { return Rational.of(this).longValue(); }
+        @Override public float floatValue()   { return Rational.of(this).floatValue(); }
+        @Override public double doubleValue() { return Rational.of(this).doubleValue(); }
     }
 
     /**
      * Parses a decimal string into an exact {@link Decimal}.
      *
-     * Accepted format: optional leading '+' or '-', digits, and at most one
-     * decimal point, with at least one digit overall.  Examples: "42",
-     * "-0.5", "+3.14159", ".25", "7.".  Surrounding whitespace is ignored.
-     * Every digit is kept; nothing is rounded or truncated.
+     * Accepted format: optional leading '+' or '-', digits, at most one decimal
+     * point, and an optional exponent ('e' or 'E', optional sign, digits), with
+     * at least one digit in the number.  Examples: "42", "-0.5", "+3.14159",
+     * ".25", "7.", "1.5e3", "2E-4".  Surrounding whitespace is ignored.  Every
+     * digit is kept; nothing is rounded or truncated.  The exponent may not be
+     * larger than {@link #MAX_EXPONENT} in either direction.
      *
      * Digits are accumulated as value = value * 10 + digit, using this
      * class's own {@link #multiply} and {@link #add}.
      *
      * @throws IllegalArgumentException if the string is null, empty, has no
-     *         digits, has more than one decimal point, or contains any other
-     *         character (including exponents such as "1e5")
+     *         digits, has more than one decimal point, has a malformed or
+     *         oversized exponent, or contains any other character
      */
     public static Decimal parseDecimal(String text) {
         if (text == null) {
@@ -158,6 +197,7 @@ public class BigFixedArithmetic {
         BigInteger value = ZERO;
         int scale = 0;
         int digitCount = 0;
+        int exponent = 0;
         boolean seenDot = false;
 
         for (; i < s.length(); i++) {
@@ -173,6 +213,9 @@ public class BigFixedArithmetic {
                 if (seenDot) {
                     scale++;
                 }
+            } else if (c == 'e' || c == 'E') {
+                exponent = parseExponent(s.substring(i + 1), text);
+                break;
             } else {
                 throw new IllegalArgumentException("Invalid character '" + c + "' in \"" + text + "\"");
             }
@@ -181,13 +224,21 @@ public class BigFixedArithmetic {
         if (digitCount == 0) {
             throw new IllegalArgumentException("No digits in \"" + text + "\"");
         }
-        return new Decimal(negative ? value.negate() : value, scale);
+
+        BigInteger unscaled = negative ? value.negate() : value;
+        int newScale = scale - exponent;
+        if (newScale < 0) {
+            unscaled = multiply(unscaled, pow10(-newScale));
+            newScale = 0;
+        }
+        return new Decimal(unscaled, newScale);
     }
 
     /**
      * Parses a whole-number string (optional sign, then digits only) into a BigInteger.
+     * A string with an exponent is accepted if the value is a whole number ("1e3").
      *
-     * @throws IllegalArgumentException if the string is not a plain integer
+     * @throws IllegalArgumentException if the string is not a whole number
      */
     public static BigInteger parseInteger(String text) {
         Decimal d = parseDecimal(text);
@@ -195,6 +246,63 @@ public class BigFixedArithmetic {
             throw new IllegalArgumentException("Not a whole number: \"" + text + "\"");
         }
         return d.unscaled;
+    }
+
+    /** Parses the text after an 'e': optional sign, then digits, at most MAX_EXPONENT in size. */
+    private static int parseExponent(String t, String original) {
+        int j = 0;
+        boolean negative = false;
+        if (j < t.length() && (t.charAt(j) == '+' || t.charAt(j) == '-')) {
+            negative = t.charAt(j) == '-';
+            j++;
+        }
+        if (j >= t.length()) {
+            throw new IllegalArgumentException("Missing exponent digits in \"" + original + "\"");
+        }
+        long value = 0;
+        for (; j < t.length(); j++) {
+            char c = t.charAt(j);
+            if (c < '0' || c > '9') {
+                throw new IllegalArgumentException("Invalid character '" + c + "' in the exponent of \"" + original + "\"");
+            }
+            value = value * 10 + (c - '0');
+            if (value > MAX_EXPONENT) {
+                throw new IllegalArgumentException("Exponent is larger than " + MAX_EXPONENT + " in \"" + original + "\"");
+            }
+        }
+        return (int) (negative ? -value : value);
+    }
+
+    // ── Scientific / engineering formatting ──────────────────────────────────
+
+    private static String stripTrailingZeros(String digits) {
+        int end = digits.length();
+        while (end > 1 && digits.charAt(end - 1) == '0') {
+            end--;
+        }
+        return digits.substring(0, end);
+    }
+
+    /**
+     * Lays out significant digits with an exponent: "d.dddE+x", or in
+     * engineering form (exponent a multiple of 3) "ddd.dddE+x".  The value is
+     * 0.digits scaled so that the first digit has weight 10^exponent.
+     */
+    private static String formatScientific(String sign, String digits, long exponent, boolean engineering) {
+        if (!engineering) {
+            String mantissa = digits.length() > 1 ? digits.charAt(0) + "." + digits.substring(1) : digits;
+            return sign + mantissa + "E" + (exponent < 0 ? "-" : "+") + Math.abs(exponent);
+        }
+        long shifted = Math.floorDiv(exponent, 3L) * 3L;
+        int intLength = (int) (exponent - shifted) + 1;
+        StringBuilder padded = new StringBuilder(digits);
+        while (padded.length() < intLength) {
+            padded.append('0');
+        }
+        String intPart = padded.substring(0, intLength);
+        String fraction = padded.substring(intLength);
+        String mantissa = fraction.isEmpty() ? intPart : intPart + "." + fraction;
+        return sign + mantissa + "E" + (shifted < 0 ? "-" : "+") + Math.abs(shifted);
     }
 
     // ── Exact Decimal Operations ─────────────────────────────────────────────
@@ -499,17 +607,25 @@ public class BigFixedArithmetic {
      */
     private static boolean roundsUp(RoundingMode mode, boolean negative, boolean lastDigitOdd,
                                     BigInteger rem, BigInteger den) {
+        return roundsUpGivenHalf(mode, negative, lastDigitOdd, add(rem, rem).compareTo(den));
+    }
+
+    /**
+     * The rounding decision given how the discarded fraction compares with one
+     * half (negative: below, zero: exactly half, positive: above).  The caller
+     * guarantees the fraction is not zero.
+     */
+    private static boolean roundsUpGivenHalf(RoundingMode mode, boolean negative,
+                                             boolean lastDigitOdd, int half) {
         switch (mode) {
             case UP:          return true;
             case DOWN:        return false;
             case CEILING:     return !negative;
             case FLOOR:       return negative;
             case UNNECESSARY: throw new ArithmeticException("Rounding necessary");
-            default:
-                int half = add(rem, rem).compareTo(den);     // compares 2*rem with den
-                if (mode == RoundingMode.HALF_UP)   return half >= 0;
-                if (mode == RoundingMode.HALF_DOWN) return half > 0;
-                return half > 0 || (half == 0 && lastDigitOdd);   // HALF_EVEN
+            case HALF_UP:     return half >= 0;
+            case HALF_DOWN:   return half > 0;
+            default:          return half > 0 || (half == 0 && lastDigitOdd);   // HALF_EVEN
         }
     }
 
@@ -517,12 +633,15 @@ public class BigFixedArithmetic {
 
     /**
      * An exact fraction num/den in lowest terms with den &gt; 0.  The sign is
-     * carried by the numerator.  Instances are immutable.
+     * carried by the numerator.  Instances are immutable.  A {@link Number}, so
+     * it converts to int, long, float and double (float and double are
+     * correctly rounded).
      *
      * Inside this class use BigInteger.ZERO / BigInteger.ONE for big-integer
      * constants: ZERO and ONE here are the Rational constants.
      */
-    public static final class Rational implements Comparable<Rational> {
+    public static final class Rational extends Number implements Comparable<Rational> {
+        private static final long serialVersionUID = 1L;
 
         public static final Rational ZERO = new Rational(BigInteger.ZERO, BigInteger.ONE);
         public static final Rational ONE  = new Rational(BigInteger.ONE,  BigInteger.ONE);
@@ -555,10 +674,22 @@ public class BigFixedArithmetic {
                 if ((e & 1L) == 1L) {
                     result = mul(result, b);
                 }
-                b = mul(b, b);
                 e >>= 1;
+                if (e > 0) {
+                    b = mul(b, b);
+                }
             }
             return result;
+        }
+
+        /** 10^e for e >= 0. */
+        private static BigInteger tenPow(long e) {
+            return powInt(TEN, e);
+        }
+
+        /** This value scaled by 10^k (k may be negative), exactly. */
+        private Rational scaleByPowerOfTen(long k) {
+            return k >= 0 ? multiply(of(tenPow(k))) : divide(of(tenPow(-k)));
         }
 
         // ── construction ─────────────────────────────────────────────────────
@@ -603,11 +734,15 @@ public class BigFixedArithmetic {
          * Parses a number written in any of these forms:
          * <ul>
          *   <li>integers and decimals: {@code 42}, {@code -0.5}, {@code .25}</li>
-         *   <li>repeating decimals: {@code 0.(3)}, {@code 0.1(6)}, {@code 3.(142857)}</li>
-         *   <li>fractions: {@code 22/7}, {@code -7/2}, {@code 1.5/0.25}, {@code 0.(3)/2}</li>
+         *   <li>scientific notation: {@code 1e5}, {@code -2.5E-3}, {@code 1.5e+2}</li>
+         *   <li>repeating decimals: {@code 0.(3)}, {@code 0.1(6)}, {@code 3.(142857)},
+         *       also with an exponent, {@code 0.(3)e2}</li>
+         *   <li>fractions: {@code 22/7}, {@code -7/2}, {@code 1.5/0.25}, {@code 1e3/4},
+         *       {@code 0.(3)/2}</li>
          *   <li>mixed numbers: {@code 3 1/7}, {@code -3 1/7} (the sign applies to the whole number)</li>
          * </ul>
          * The value is exact: {@code 0.(3)} is exactly 1/3 and {@code 0.(9)} is exactly 1.
+         * An exponent may not be larger than {@link #MAX_EXPONENT} in either direction.
          *
          * @throws IllegalArgumentException if the text is not in one of these forms
          * @throws ArithmeticException if a fraction has a zero denominator
@@ -647,13 +782,17 @@ public class BigFixedArithmetic {
         /**
          * Parses positional notation in the given base (2 to 36), optionally with a
          * repeating block, for example {@code parse("0.(0011)", 2)} is 1/5.
-         * Fractions and mixed numbers are only understood by {@link #parse(String)}.
+         * In base 10 an exponent is also accepted.  Fractions and mixed numbers are
+         * only understood by {@link #parse(String)}.
          */
         public static Rational parse(String text, int radix) {
             return parsePositional(text, radix);
         }
 
         private static Rational parseMixed(String wholeText, String fractionText, String original) {
+            if (hasExponent(wholeText) || hasExponent(fractionText)) {
+                throw new IllegalArgumentException("Not a mixed number: \"" + original + "\"");
+            }
             boolean negative = wholeText.startsWith("-");
             String wholeDigits = (wholeText.startsWith("-") || wholeText.startsWith("+"))
                     ? wholeText.substring(1) : wholeText;
@@ -674,6 +813,10 @@ public class BigFixedArithmetic {
 
         private static boolean hasSign(String s) {
             return s.indexOf('-') >= 0 || s.indexOf('+') >= 0;
+        }
+
+        private static boolean hasExponent(String s) {
+            return s.indexOf('e') >= 0 || s.indexOf('E') >= 0;
         }
 
         private static Rational parsePositional(String text, int radix) {
@@ -702,12 +845,20 @@ public class BigFixedArithmetic {
             int fracLen = 0;
             int repLen = 0;
             int digits = 0;
+            int exponent = 0;
             boolean seenDot = false;
             boolean seenOpen = false;
             boolean seenClose = false;
 
             for (; i < s.length(); i++) {
                 char c = s.charAt(i);
+                if (radix == 10 && (c == 'e' || c == 'E')) {
+                    if (seenOpen && !seenClose) {
+                        throw new IllegalArgumentException("Unterminated repeating block in \"" + text + "\"");
+                    }
+                    exponent = parseExponent(s.substring(i + 1), text);
+                    break;
+                }
                 if (seenClose) {
                     throw new IllegalArgumentException("Unexpected '" + c + "' after the repeating block in \"" + text + "\"");
                 }
@@ -770,7 +921,8 @@ public class BigFixedArithmetic {
                 numerator = mul(base, nines).add(repPart);
                 denominator = mul(scaleA, nines);
             }
-            return of(negative ? numerator.negate() : numerator, denominator);
+            Rational value = of(negative ? numerator.negate() : numerator, denominator);
+            return exponent == 0 ? value : value.scaleByPowerOfTen(exponent);
         }
 
         // ── arithmetic ───────────────────────────────────────────────────────
@@ -811,7 +963,7 @@ public class BigFixedArithmetic {
             return of(den, num);
         }
 
-        /** This raised to an integer power (negative powers take the reciprocal). */
+        /** This raised to an integer power, exactly (negative powers take the reciprocal). */
         public Rational pow(int exponent) {
             if (exponent == 0) {
                 return ONE;
@@ -831,6 +983,394 @@ public class BigFixedArithmetic {
 
         public boolean isInteger() {
             return den.equals(BigInteger.ONE);
+        }
+
+        // ── bounded-precision arithmetic ─────────────────────────────────────
+
+        /** this + o, then limited to the precision of {@code ctx}. */
+        public Rational add(Rational o, Context ctx) {
+            return ctx.apply(add(o));
+        }
+
+        /** this - o, then limited to the precision of {@code ctx}. */
+        public Rational subtract(Rational o, Context ctx) {
+            return ctx.apply(subtract(o));
+        }
+
+        /** this * o, then limited to the precision of {@code ctx}. */
+        public Rational multiply(Rational o, Context ctx) {
+            return ctx.apply(multiply(o));
+        }
+
+        /** this / o, then limited to the precision of {@code ctx}. */
+        public Rational divide(Rational o, Context ctx) {
+            return ctx.apply(divide(o));
+        }
+
+        /** Rounds to the given number of significant decimal digits. */
+        public Rational roundToSignificantDigits(int digits, RoundingMode mode) {
+            if (digits < 1) {
+                throw new IllegalArgumentException("Significant digits must be at least 1");
+            }
+            Objects.requireNonNull(mode, "mode");
+            if (num.signum() == 0) {
+                return this;
+            }
+            long lastKept = floorLog10(abs()) - digits + 1;      // exponent of the last digit kept
+            BigInteger units = scaleByPowerOfTen(-lastKept).round(mode);
+            return lastKept >= 0 ? of(mul(units, tenPow(lastKept))) : of(units, tenPow(-lastKept));
+        }
+
+        /** Rounds to the given number of decimal places. */
+        public Rational roundToDecimalPlaces(int places, RoundingMode mode) {
+            if (places < 0) {
+                throw new IllegalArgumentException("Decimal places must not be negative");
+            }
+            return roundToDenominator(tenPow(places), mode);
+        }
+
+        /**
+         * A precision limit applied to a result, in the way {@link java.math.MathContext}
+         * limits a BigDecimal.  Four kinds exist:
+         * <ul>
+         *   <li>{@link #UNLIMITED}: no limit; results stay exact (and operations whose
+         *       exact result is not rational, such as sqrt(2), throw)</li>
+         *   <li>{@link #significantDigits(int, RoundingMode)}: round to N significant decimal digits</li>
+         *   <li>{@link #decimalPlaces(int, RoundingMode)}: round to N places after the decimal point</li>
+         *   <li>{@link #maxDenominator(BigInteger)}: the nearest fraction whose denominator is at
+         *       most the limit, which keeps numerators and denominators from growing without bound</li>
+         * </ul>
+         * Where a rounding mode applies, the context holds it.  The denominator limit
+         * always chooses the nearest fraction, so it has no rounding mode.
+         */
+        public static final class Context {
+            private enum Kind { UNLIMITED, SIGNIFICANT_DIGITS, DECIMAL_PLACES, MAX_DENOMINATOR }
+
+            /** No limit: results stay exact. */
+            public static final Context UNLIMITED = new Context(Kind.UNLIMITED, 0, BigInteger.ONE, RoundingMode.HALF_UP);
+
+            private final Kind kind;
+            private final int amount;
+            private final BigInteger limit;
+            private final RoundingMode mode;
+
+            private Context(Kind kind, int amount, BigInteger limit, RoundingMode mode) {
+                this.kind = kind;
+                this.amount = amount;
+                this.limit = limit;
+                this.mode = mode;
+            }
+
+            /** N significant decimal digits, rounded with {@code mode}. */
+            public static Context significantDigits(int digits, RoundingMode mode) {
+                if (digits < 1) {
+                    throw new IllegalArgumentException("Significant digits must be at least 1");
+                }
+                return new Context(Kind.SIGNIFICANT_DIGITS, digits, BigInteger.ONE, Objects.requireNonNull(mode, "mode"));
+            }
+
+            /** N significant decimal digits, rounded HALF_UP. */
+            public static Context significantDigits(int digits) {
+                return significantDigits(digits, RoundingMode.HALF_UP);
+            }
+
+            /** N places after the decimal point, rounded with {@code mode}. */
+            public static Context decimalPlaces(int places, RoundingMode mode) {
+                if (places < 0) {
+                    throw new IllegalArgumentException("Decimal places must not be negative");
+                }
+                return new Context(Kind.DECIMAL_PLACES, places, BigInteger.ONE, Objects.requireNonNull(mode, "mode"));
+            }
+
+            /** N places after the decimal point, rounded HALF_UP. */
+            public static Context decimalPlaces(int places) {
+                return decimalPlaces(places, RoundingMode.HALF_UP);
+            }
+
+            /** Nearest fraction with a denominator of at most {@code max}. */
+            public static Context maxDenominator(BigInteger max) {
+                if (max.signum() <= 0) {
+                    throw new IllegalArgumentException("Maximum denominator must be positive");
+                }
+                return new Context(Kind.MAX_DENOMINATOR, 0, max, RoundingMode.HALF_EVEN);
+            }
+
+            public static Context maxDenominator(long max) {
+                return maxDenominator(BigInteger.valueOf(max));
+            }
+
+            /** Limits {@code x} to this context's precision. */
+            public Rational apply(Rational x) {
+                switch (kind) {
+                    case SIGNIFICANT_DIGITS: return x.roundToSignificantDigits(amount, mode);
+                    case DECIMAL_PLACES:     return x.roundToDecimalPlaces(amount, mode);
+                    case MAX_DENOMINATOR:    return x.bestApproximation(limit);
+                    default:                 return x;
+                }
+            }
+
+            @Override
+            public String toString() {
+                switch (kind) {
+                    case SIGNIFICANT_DIGITS: return "significantDigits(" + amount + ", " + mode + ")";
+                    case DECIMAL_PLACES:     return "decimalPlaces(" + amount + ", " + mode + ")";
+                    case MAX_DENOMINATOR:    return "maxDenominator(" + limit + ")";
+                    default:                 return "UNLIMITED";
+                }
+            }
+        }
+
+        /** floor(log10(x)) for x &gt; 0. */
+        private static long floorLog10(Rational x) {
+            long t = (long) x.num.toString().length() - x.den.toString().length();
+            // x lies strictly between 10^(t-1) and 10^(t+1); is it at least 10^t?
+            boolean atLeast = t >= 0
+                    ? x.num.compareTo(mul(tenPow(t), x.den)) >= 0
+                    : mul(x.num, tenPow(-t)).compareTo(x.den) >= 0;
+            return atLeast ? t : t - 1;
+        }
+
+        // ── square roots, nth roots and powers ───────────────────────────────
+
+        /**
+         * Square root, exactly.  Succeeds only if the root is rational (both numerator
+         * and denominator are perfect squares); otherwise use {@link #sqrt(Context)}.
+         *
+         * @throws ArithmeticException if this is negative or its root is irrational
+         */
+        public Rational sqrt() {
+            return root(2, Context.UNLIMITED);
+        }
+
+        /**
+         * Square root limited to the precision of {@code ctx}, correctly rounded: the
+         * result is the true root rounded as the context says, never an approximation
+         * of an approximation.  An exact root (such as 3/2 for 9/4) is rounded the same
+         * way.
+         *
+         * @throws ArithmeticException if this is negative, or if the root is irrational
+         *         and {@code ctx} is {@link Context#UNLIMITED}
+         */
+        public Rational sqrt(Context ctx) {
+            return root(2, ctx);
+        }
+
+        /** True if the nth root of this is itself a rational number. */
+        public boolean hasRationalRoot(int n) {
+            if (n < 1) {
+                throw new IllegalArgumentException("Root index must be at least 1");
+            }
+            if (num.signum() < 0 && (n & 1) == 0) {
+                return false;
+            }
+            Rational x = abs();
+            return isPerfectPower(x.num, n) && isPerfectPower(x.den, n);
+        }
+
+        /**
+         * The nth root (n at least 1), limited to the precision of {@code ctx} and
+         * correctly rounded.  Odd roots of negative numbers are real: the cube root of
+         * -8 is -2.
+         *
+         * @throws ArithmeticException for an even root of a negative number, or if the
+         *         root is irrational and {@code ctx} is {@link Context#UNLIMITED}
+         */
+        public Rational root(int n, Context ctx) {
+            if (n < 1) {
+                throw new IllegalArgumentException("Root index must be at least 1");
+            }
+            Objects.requireNonNull(ctx, "ctx");
+            if (n == 1) {
+                return ctx.apply(this);
+            }
+            if (num.signum() == 0) {
+                return ZERO;
+            }
+            boolean negative = num.signum() < 0;
+            if (negative && (n & 1) == 0) {
+                throw new ArithmeticException("Even root of a negative number");
+            }
+            Rational x = abs();
+
+            // A rational root exists exactly when numerator and denominator are both perfect powers
+            BigInteger rootNum = integerRoot(x.num, n);
+            BigInteger rootDen = integerRoot(x.den, n);
+            if (powInt(rootNum, n).equals(x.num) && powInt(rootDen, n).equals(x.den)) {
+                Rational exact = of(rootNum, rootDen);
+                return ctx.apply(negative ? exact.negate() : exact);
+            }
+
+            // The root is irrational
+            Rational magnitudeResult;
+            switch (ctx.kind) {
+                case SIGNIFICANT_DIGITS:
+                case DECIMAL_PLACES:
+                    magnitudeResult = irrationalRootToDigits(x, n, negative, ctx);
+                    return negative ? magnitudeResult.negate() : magnitudeResult;
+                case MAX_DENOMINATOR:
+                    magnitudeResult = irrationalRootNearest(x, n, ctx.limit);
+                    return negative ? magnitudeResult.negate() : magnitudeResult;
+                default:
+                    throw new ArithmeticException("The root is irrational; a precision limit is required");
+            }
+        }
+
+        /**
+         * This raised to a rational power, limited to the precision of {@code ctx}.
+         * For an exponent p/q the result is the qth root of this^p, rounded once, so it
+         * is correctly rounded.  Negative bases work when q is odd; a zero base needs a
+         * positive exponent.
+         *
+         * @throws ArithmeticException for a negative base with an even root, zero to a
+         *         negative power, an exponent too large to handle, or an irrational
+         *         result under {@link Context#UNLIMITED}
+         */
+        public Rational pow(Rational exponent, Context ctx) {
+            Objects.requireNonNull(exponent, "exponent");
+            Objects.requireNonNull(ctx, "ctx");
+            if (exponent.num.bitLength() > 30 || exponent.den.bitLength() > 30) {
+                throw new ArithmeticException("Exponent too large");
+            }
+            int p = exponent.num.intValue();
+            int q = exponent.den.intValue();
+            if (q == 1) {
+                return ctx.apply(pow(p));
+            }
+            if (num.signum() == 0) {
+                if (p > 0) {
+                    return ZERO;
+                }
+                throw new ArithmeticException("Zero raised to a negative power");
+            }
+            if (num.signum() < 0 && (q & 1) == 0) {
+                throw new ArithmeticException("Even root of a negative number");
+            }
+            Rational base = p < 0 ? reciprocal() : this;
+            return base.pow(Math.abs(p)).root(q, ctx);
+        }
+
+        /** This raised to a rational power, exactly; the result must be rational. */
+        public Rational pow(Rational exponent) {
+            return pow(exponent, Context.UNLIMITED);
+        }
+
+        /** This raised to an integer power, then limited to the precision of {@code ctx}. */
+        public Rational pow(int exponent, Context ctx) {
+            return ctx.apply(pow(exponent));
+        }
+
+        /** floor of the nth root of a non-negative integer, by Newton's method. */
+        private static BigInteger integerRoot(BigInteger n, int k) {
+            if (k == 1 || n.compareTo(BigInteger.ONE) <= 0) {
+                return n;
+            }
+            BigInteger kBig = BigInteger.valueOf(k);
+            BigInteger kMinusOne = BigInteger.valueOf(k - 1);
+            BigInteger x = BigInteger.ONE.shiftLeft((n.bitLength() + k - 1) / k);   // at least the root
+            while (true) {
+                BigInteger y = longDivide(mul(kMinusOne, x).add(longDivide(n, powInt(x, k - 1))), kBig);
+                if (y.compareTo(x) >= 0) {
+                    return x;
+                }
+                x = y;
+            }
+        }
+
+        private static boolean isPerfectPower(BigInteger n, int k) {
+            return powInt(integerRoot(n, k), k).equals(n);
+        }
+
+        /**
+         * Rounds the irrational nth root of x (x &gt; 0) to digits.  With
+         * k = the number of decimal places kept, floor(root(x) * 10^k) is the
+         * integer root of floor(x * 10^(n k)); the rounding decision compares
+         * x * 10^(n k) with the exact half-way point (s + 1/2)^n, so no
+         * approximation of the root is ever rounded a second time.
+         */
+        private static Rational irrationalRootToDigits(Rational x, int n, boolean negative, Context ctx) {
+            long k;
+            if (ctx.kind == Context.Kind.SIGNIFICANT_DIGITS) {
+                k = ctx.amount - 1 - Math.floorDiv(floorLog10(x), (long) n);
+            } else {
+                k = ctx.amount;
+            }
+            while (true) {
+                Rational scaled = x.scaleByPowerOfTen(k * n);
+                BigInteger s = integerRoot(scaled.floor(), n);
+                if (ctx.kind == Context.Kind.SIGNIFICANT_DIGITS && s.toString().length() < ctx.amount) {
+                    k++;                    // not expected; guards against an off-by-one in the estimate
+                    continue;
+                }
+                // Compare root(scaled) with s + 1/2:  scaled * 2^n against (2s + 1)^n
+                BigInteger twoS1 = s.add(s).add(BigInteger.ONE);
+                int half = scaled.multiply(of(powInt(BigInteger.valueOf(2), n))).compareTo(of(powInt(twoS1, n)));
+                boolean up = roundsUpGivenHalf(ctx.mode, negative, s.testBit(0), half);
+                BigInteger units = up ? s.add(BigInteger.ONE) : s;
+                return k >= 0 ? of(units, tenPow(k)) : of(mul(units, tenPow(-k)));
+            }
+        }
+
+        /** Sign of (p/q)^n - x, for p/q &gt;= 0 and x &gt; 0. */
+        private static int comparePowerWith(BigInteger p, BigInteger q, Rational x, int n) {
+            return mul(powInt(p, n), x.den).compareTo(mul(x.num, powInt(q, n)));
+        }
+
+        /**
+         * The fraction with denominator at most {@code limit} nearest to the irrational
+         * nth root of x (x &gt; 0).  Walks the Stern-Brocot tree using exact comparisons
+         * of (p/q)^n with x, moving in whole runs found by binary search, until the two
+         * bracketing fractions are Farey neighbours that no fraction of allowed size
+         * separates; then picks the nearer by comparing the root with their midpoint.
+         */
+        private static Rational irrationalRootNearest(Rational x, int n, BigInteger limit) {
+            BigInteger floorRoot = integerRoot(longDivide(x.num, x.den), n);
+            BigInteger p1 = floorRoot;                          // below the root
+            BigInteger q1 = BigInteger.ONE;
+            BigInteger p2 = floorRoot.add(BigInteger.ONE);      // above the root
+            BigInteger q2 = BigInteger.ONE;
+
+            boolean progress = true;
+            while (progress) {
+                progress = false;
+
+                // Move the lower fraction up toward the root: (p1 + k p2) / (q1 + k q2) while below it
+                BigInteger lo = BigInteger.ZERO;
+                BigInteger hi = longDivide(limit.subtract(q1), q2);
+                while (lo.compareTo(hi) < 0) {
+                    BigInteger mid = lo.add(hi).add(BigInteger.ONE).shiftRight(1);
+                    if (comparePowerWith(p1.add(mul(mid, p2)), q1.add(mul(mid, q2)), x, n) < 0) {
+                        lo = mid;
+                    } else {
+                        hi = mid.subtract(BigInteger.ONE);
+                    }
+                }
+                if (lo.signum() > 0) {
+                    p1 = p1.add(mul(lo, p2));
+                    q1 = q1.add(mul(lo, q2));
+                    progress = true;
+                }
+
+                // Move the upper fraction down toward the root while above it
+                lo = BigInteger.ZERO;
+                hi = longDivide(limit.subtract(q2), q1);
+                while (lo.compareTo(hi) < 0) {
+                    BigInteger mid = lo.add(hi).add(BigInteger.ONE).shiftRight(1);
+                    if (comparePowerWith(p2.add(mul(mid, p1)), q2.add(mul(mid, q1)), x, n) > 0) {
+                        lo = mid;
+                    } else {
+                        hi = mid.subtract(BigInteger.ONE);
+                    }
+                }
+                if (lo.signum() > 0) {
+                    p2 = p2.add(mul(lo, p1));
+                    q2 = q2.add(mul(lo, q1));
+                    progress = true;
+                }
+            }
+
+            BigInteger midNum = mul(p1, q2).add(mul(p2, q1));
+            BigInteger midDen = mul(BigInteger.valueOf(2), mul(q1, q2));
+            return comparePowerWith(midNum, midDen, x, n) < 0 ? of(p2, q2) : of(p1, q1);
         }
 
         // ── exact comparison ─────────────────────────────────────────────────
@@ -859,6 +1399,93 @@ public class BigFixedArithmetic {
         @Override
         public int hashCode() {
             return 31 * num.hashCode() + den.hashCode();
+        }
+
+        // ── Number conversions ───────────────────────────────────────────────
+
+        /** The integer part, narrowed like {@link BigInteger#intValue()}. */
+        @Override
+        public int intValue() {
+            return truncate().intValue();
+        }
+
+        /** The integer part, narrowed like {@link BigInteger#longValue()}. */
+        @Override
+        public long longValue() {
+            return truncate().longValue();
+        }
+
+        /** The nearest float (ties to even); may be infinite or zero when out of range. */
+        @Override
+        public float floatValue() {
+            if (num.signum() == 0) {
+                return 0.0f;
+            }
+            long[] t = binaryApproximation(24, -149);
+            float magnitude = Math.scalb((float) t[0], clampExponent(t[1]));
+            return num.signum() < 0 ? -magnitude : magnitude;
+        }
+
+        /** The nearest double (ties to even); may be infinite or zero when out of range. */
+        @Override
+        public double doubleValue() {
+            if (num.signum() == 0) {
+                return 0.0;
+            }
+            long[] t = binaryApproximation(53, -1074);
+            double magnitude = Math.scalb((double) t[0], clampExponent(t[1]));
+            return num.signum() < 0 ? -magnitude : magnitude;
+        }
+
+        private static int clampExponent(long e) {
+            return (int) Math.max(-100_000L, Math.min(100_000L, e));
+        }
+
+        /**
+         * |this| as q * 2^e with q holding at most {@code precision} bits, rounded to
+         * nearest with ties to even.  {@code minGridExponent} is the exponent of the
+         * smallest representable step, which handles subnormal numbers.  Returns {q, e}.
+         */
+        private long[] binaryApproximation(int precision, int minGridExponent) {
+            BigInteger a = num.abs();
+            BigInteger b = den;
+            long e = (long) a.bitLength() - b.bitLength() - precision;
+            BigInteger q;
+            BigInteger r;
+            BigInteger d;
+            while (true) {
+                BigInteger n2 = e >= 0 ? a : a.shiftLeft((int) -e);
+                d = e >= 0 ? b.shiftLeft((int) e) : b;
+                q = longDivide(n2, d);
+                r = n2.subtract(mul(q, d));
+                if (q.bitLength() > precision) {
+                    e++;                         // one bit too many: halve the scale and retry
+                    continue;
+                }
+                break;
+            }
+
+            if (e < minGridExponent) {
+                // Subnormal range: fewer bits are available, so drop the extra low bits
+                long shift = minGridExponent - e;
+                if (shift > precision) {
+                    return new long[] { 0, minGridExponent };      // below half the smallest step
+                }
+                BigInteger low = q.and(BigInteger.ONE.shiftLeft((int) shift).subtract(BigInteger.ONE));
+                BigInteger half = BigInteger.ONE.shiftLeft((int) shift - 1);
+                q = q.shiftRight((int) shift);
+                int cmp = low.compareTo(half);
+                if (cmp > 0 || (cmp == 0 && (r.signum() != 0 || q.testBit(0)))) {
+                    q = q.add(BigInteger.ONE);
+                }
+                return new long[] { q.longValue(), minGridExponent };
+            }
+
+            int cmp = r.add(r).compareTo(d);
+            if (cmp > 0 || (cmp == 0 && q.testBit(0))) {
+                q = q.add(BigInteger.ONE);
+            }
+            return new long[] { q.longValue(), e };
         }
 
         // ── floor, ceiling and rounding ──────────────────────────────────────
@@ -994,6 +1621,73 @@ public class BigFixedArithmetic {
             return toRadixString(10, -1, RoundingMode.HALF_UP);
         }
 
+        // ── scientific and engineering notation ──────────────────────────────
+
+        /**
+         * Scientific notation rounded to exactly {@code significantDigits} digits,
+         * trailing zeros included: 12345.678 with 5 digits is "1.2346E+4" and 1/4 with
+         * 5 digits is "2.5000E-1".  Zero is "0E+0".
+         */
+        public String toScientificString(int significantDigits, RoundingMode mode) {
+            return formatSignificant(significantDigits, mode, false);
+        }
+
+        /**
+         * Engineering notation (exponent a multiple of 3) rounded to exactly
+         * {@code significantDigits} digits: 12345.678 with 5 digits is "12.346E+3".
+         */
+        public String toEngineeringString(int significantDigits, RoundingMode mode) {
+            return formatSignificant(significantDigits, mode, true);
+        }
+
+        /**
+         * Scientific notation with the fewest digits that represent the value exactly,
+         * for example "1.25E-1".
+         *
+         * @throws ArithmeticException if the decimal expansion does not terminate
+         *         (use the digit-count version for those values)
+         */
+        public String toScientificString() {
+            return formatExact(false);
+        }
+
+        /** Engineering notation with the fewest digits that represent the value exactly. */
+        public String toEngineeringString() {
+            return formatExact(true);
+        }
+
+        private String formatSignificant(int digits, RoundingMode mode, boolean engineering) {
+            if (digits < 1) {
+                throw new IllegalArgumentException("Significant digits must be at least 1");
+            }
+            Objects.requireNonNull(mode, "mode");
+            if (num.signum() == 0) {
+                return "0E+0";
+            }
+            long exponent = floorLog10(abs());
+            BigInteger units = scaleByPowerOfTen(digits - 1 - exponent).round(mode);
+            boolean negative = units.signum() < 0;
+            String ds = units.abs().toString();
+            if (ds.length() > digits) {          // rounded up to the next power of ten
+                ds = ds.substring(0, digits);
+                exponent++;
+            }
+            return formatScientific(negative ? "-" : "", ds, exponent, engineering);
+        }
+
+        private String formatExact(boolean engineering) {
+            if (num.signum() == 0) {
+                return "0E+0";
+            }
+            if (!splitDenominator(den, TEN)[0].equals(BigInteger.ONE)) {
+                throw new ArithmeticException("Non-terminating decimal expansion; specify a number of digits");
+            }
+            long fractionDigits = preperiodLength();
+            String full = quotient(mul(num.abs(), tenPow(fractionDigits)), den).toString();
+            return formatScientific(num.signum() < 0 ? "-" : "", stripTrailingZeros(full),
+                                    (long) full.length() - 1 - fractionDigits, engineering);
+        }
+
         // ── continued fractions and approximation ────────────────────────────
 
         /**
@@ -1014,7 +1708,7 @@ public class BigFixedArithmetic {
             return terms;
         }
 
-        /** Text form of {@link #continuedFraction()}, e.g. "[3; 7, 15, 1]". */
+        /** Text form of {@link #continuedFraction()}, e.g. "[3; 7, 16]". */
         public String toContinuedFractionString() {
             List<BigInteger> terms = continuedFraction();
             StringBuilder sb = new StringBuilder("[").append(terms.get(0));
@@ -1236,7 +1930,7 @@ public class BigFixedArithmetic {
         Scanner scanner = new Scanner(System.in);
 
         System.out.println("=== BigFixedArithmetic Demo ===");
-        System.out.println("Numbers may be integers or decimals, e.g. 42, -0.5, 3.14159");
+        System.out.println("Numbers may be integers, decimals or scientific notation, e.g. 42, -0.5, 3.14159, 1.5e3");
 
         Decimal a;
         Decimal b;
@@ -1286,6 +1980,11 @@ public class BigFixedArithmetic {
             System.out.println("Fraction           : " + quotient);
             System.out.println("Mixed number       : " + quotient.toMixedString());
             System.out.println("Continued fraction : " + quotient.toContinuedFractionString());
+            System.out.println("Scientific (10 sig): " + quotient.toScientificString(10, RoundingMode.HALF_UP));
+            if (quotient.signum() >= 0) {
+                Rational root = quotient.sqrt(Rational.Context.significantDigits(30));
+                System.out.println("Square root (30 sig): " + root.toScientificString());
+            }
         } catch (ArithmeticException | IllegalArgumentException e) {
             System.out.println();
             System.out.println("Error: " + e.getMessage());

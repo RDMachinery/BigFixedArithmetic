@@ -1,12 +1,12 @@
 # BigFixedArithmetic
 
-Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers from strings without losing a digit, divides exactly (repeating decimals are detected and shown as `0.(3)`), and includes a `Rational` fraction type with features `BigDecimal` doesn't have: repeating-decimal parsing, cycle analysis, expansion in any base, continued fractions, best approximations, and mixed-number and Egyptian-fraction output.
+Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers from strings (including scientific notation) without losing a digit, divides exactly (repeating decimals are detected and shown as `0.(3)`), and includes a `Rational` fraction type, a `Number` subclass, with features `BigDecimal` doesn't have: repeating-decimal parsing, cycle analysis, expansion in any base, continued fractions, best approximations, correctly rounded square roots, nth roots and fractional powers, and bounded-precision contexts that stop fractions growing without limit.
 
 ## Features
 
 **Arithmetic and parsing**
 - Exact addition, subtraction and multiplication (Russian Peasant) at any size, with no overflow.
-- Decimal strings parsed exactly (`parseDecimal`, `parseInteger`): `"-12.375"` is held as `-12375` with 3 decimal places.
+- Decimal strings parsed exactly (`parseDecimal`, `parseInteger`), including scientific notation: `"-12.375"` is held as `-12375` with 3 decimal places and `"1.5e3"` as `1500`.
 - Exact `Decimal` add, subtract and multiply.
 
 **Division**
@@ -14,11 +14,15 @@ Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers
 - **Fixed-places mode** rounds to the places you ask for, using any `java.math.RoundingMode` (default `HALF_UP`).
 - Both modes work in **any base from 2 to 36**: `1/3` is `0.1` in base 3 and `1/10` is `0.0(0011)` in base 2.
 
-**`Rational`: an exact fraction type**
+**`Rational`: an exact fraction type (a `Number` subclass)**
 - Lowest-terms `BigInteger` fractions with `add`, `subtract`, `multiply`, `divide`, `pow`, `negate`, `reciprocal`.
+- **`Number` conversions:** `intValue`, `longValue`, `floatValue` and `doubleValue`. The float and double results are correctly rounded (ties to even), including subnormals and overflow to infinity. `Decimal` is a `Number` too.
 - **Exact comparison** (`compareTo`, `equals`) that works even for values with no finite decimal form.
 - **Floor, ceiling, truncate and rounding** (`round(mode)`), plus `roundToDenominator(n, mode)` to round to the nearest 1/n, for example the nearest sixteenth.
-- **Parsing** of integers, decimals, repeating decimals (`0.(3)`, `0.1(6)`), fractions (`22/7`, `1.5/0.25`) and mixed numbers (`3 1/7`, `-3 1/7`), all exactly. `parse(text, base)` reads positional notation in any base.
+- **Parsing** of integers, decimals, scientific notation (`1.5e3`), repeating decimals (`0.(3)`, `0.1(6)`, `0.(3)e2`), fractions (`22/7`, `1.5/0.25`) and mixed numbers (`3 1/7`, `-3 1/7`), all exactly. `parse(text, base)` reads positional notation in any base.
+- **Scientific and engineering output**, either rounded to a number of significant digits or exact: `1.2346E+4`, `12.346E+3`.
+- **Bounded precision** through `Rational.Context`: limit results to N significant digits, N decimal places, or a maximum denominator, so chained arithmetic doesn't grow without limit.
+- **Square roots, nth roots and powers** (`sqrt`, `root`, `pow`) with integer or fractional exponents, correctly rounded to the precision you choose.
 - **Cycle analysis**: `preperiodLength()` and `periodLength()` (any base) report how many digits come before the repeating block and how long the block is, without generating digits.
 - **Expansion in any base** with `toRadixString(base, places, mode)`, plus `toDecimalString` and `toRepeatingString`.
 - **Continued fractions**: `continuedFraction()`, `convergents()`, `fromContinuedFraction(...)`.
@@ -26,6 +30,38 @@ Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers
 - **Formatting**: mixed numbers (`3 1/7`) and Egyptian fractions (`4/13 = 1/4 + 1/18 + 1/468`).
 
 No dependencies beyond the JDK.
+
+## When to use BigFixedArithmetic (and when to use BigDecimal first)
+
+> **Caveat: consider `java.math.BigDecimal` first.** `BigDecimal` is part of the JDK, is heavily optimised, is understood by every Java developer, and is supported by JDBC, JSON libraries, frameworks and tooling. For most scientific and financial code it is the right choice, and it is much faster than this library. Reach for `BigFixedArithmetic` only when you hit a limit that `BigDecimal` cannot meet, and measure the speed cost before committing to it.
+
+### Financial applications
+
+`BigDecimal` is enough for most money handling: prices, invoices, interest at a fixed scale, tax with a defined rounding rule. `BigFixedArithmetic` is a better fit when:
+
+- **Division must be exact.** `BigDecimal.divide` throws for `1/3` unless you pick a rounding. Here `1/3` is kept as the fraction `1/3` and prints as `0.(3)`, so splitting a payment three ways and recombining gives exactly the original amount, with no cent lost.
+- **Rates and ratios must stay exact through a chain of calculations.** Currency conversion, pro-rata allocation, day-count fractions (such as 31/365) and compound factors can be carried as `Rational` values and rounded once, at the end, with the rounding mode you choose.
+- **You need an audit trail.** Exact fractions and exact decimal output let you show that a result is not an accumulation of rounding errors, and `Context` lets you state the rounding point explicitly.
+- **You must reconcile in several bases or formats**, or need the repeating pattern of a quotient (`periodLength()`, `toRepeatingString()`).
+
+Keep using `BigDecimal` for storage and interchange (database columns, APIs, reports), and convert at the edges: `Rational.parse(bigDecimal.toPlainString())` in, `toDecimalString(places, mode)` out.
+
+### Scientific applications
+
+`BigDecimal` is enough when you need a fixed number of digits more than `double` provides and your operations are add, subtract, multiply and divide with a `MathContext`. `BigFixedArithmetic` is a better fit when:
+
+- **You need exact rational results** such as ratios, rational approximations, unit conversions with exact factors, or the exact value of a repeating expansion that `BigDecimal` can only truncate.
+- **You need correctly rounded roots and fractional powers.** `sqrt`, `root` and `pow` with a `Rational` exponent are rounded once from the true value, to the digits, places or denominator limit you set. (`BigDecimal.sqrt` exists from Java 9, but there are no nth roots or fractional powers.)
+- **You need number-theory style tools**: continued fractions and convergents, best rational approximation with a bounded denominator, cycle analysis (preperiod and period lengths in any base), and expansion in bases 2 to 36.
+- **Results must be reproducible and independent of binary floating point**, including exact `doubleValue()` and `floatValue()` conversions for comparing against `double` code.
+- **You want to prove or test a claim**, for example checking a floating-point result against the exact answer.
+
+### Where BigDecimal is the better choice
+
+- Performance matters. This library multiplies and divides the long way, and `Rational` normalises to lowest terms after every operation.
+- You only need decimal numbers at a fixed or limited scale, which is what `BigDecimal` was designed for.
+- You need to interoperate with libraries, databases or serialisation formats that expect `BigDecimal`.
+- You need transcendental functions (sine, logarithm, exponential, pi). Neither class provides them as exact values, and this library does not include them.
 
 ## Requirements
 
@@ -48,7 +84,7 @@ Example session (exact mode):
 
 ```
 === BigFixedArithmetic Demo ===
-Numbers may be integers or decimals, e.g. 42, -0.5, 3.14159
+Numbers may be integers, decimals or scientific notation, e.g. 42, -0.5, 3.14159, 1.5e3
 Enter Dividend / First Operand: 355
 Enter Divisor / Second Operand: 113
 
@@ -65,13 +101,15 @@ Division Result (a / b): 3.(1415929203539823008849557522123893805309734513274336
 Fraction           : 355/113
 Mixed number       : 3 16/113
 Continued fraction : [3; 7, 16]
+Scientific (10 sig): 3.141592920E+0
+Square root (30 sig): 1.77245392615830279609194647606E+0
 ```
 
 Choosing a number of places instead rounds the result: `2 / 3` to 5 places with `HALF_UP` prints `0.66667`.
 
 ## Using it as a library
 
-Copy `BigFixedArithmetic.java` into your project.
+Copy `BigFixedArithmetic.java` into your project. The examples below use a shorthand `Rational` for `BigFixedArithmetic.Rational` and `Context` for `BigFixedArithmetic.Rational.Context`.
 
 ### Division
 
@@ -94,51 +132,118 @@ BigFixedArithmetic.divideToString(one, BigInteger.TEN, -1, RoundingMode.HALF_UP,
 ### Rational
 
 ```java
-import java.math.BigInteger;
-import java.math.RoundingMode;
-import java.util.List;
-
-BigFixedArithmetic.Rational third = BigFixedArithmetic.Rational.parse("1/3");
+Rational third = Rational.parse("1/3");
 
 // Exact arithmetic: no rounding anywhere
-third.multiply(BigFixedArithmetic.Rational.of(3));        // 1
-BigFixedArithmetic.Rational.parse("0.1").add(BigFixedArithmetic.Rational.parse("0.2"));  // 3/10
+third.multiply(Rational.of(3));                    // 1
+Rational.parse("0.1").add(Rational.parse("0.2")); // 3/10
 
 // Parsing every form
-BigFixedArithmetic.Rational.parse("0.(3)");          // 1/3
-BigFixedArithmetic.Rational.parse("0.1(6)");         // 1/6
-BigFixedArithmetic.Rational.parse("3.(142857)");     // 22/7
-BigFixedArithmetic.Rational.parse("-3 1/7");         // -22/7
-BigFixedArithmetic.Rational.parse("1.5/0.25");       // 6
-BigFixedArithmetic.Rational.parse("0.(0011)", 2);    // 1/5, read in base 2
+Rational.parse("0.(3)");          // 1/3
+Rational.parse("0.1(6)");         // 1/6
+Rational.parse("3.(142857)");     // 22/7
+Rational.parse("-3 1/7");         // -22/7
+Rational.parse("1.5/0.25");       // 6
+Rational.parse("1.5e3");          // 1500
+Rational.parse("2.5E-3");         // 1/400
+Rational.parse("0.(3)e2");        // 100/3
+Rational.parse("0.(0011)", 2);    // 1/5, read in base 2
 
 // Exact comparison, floor, ceiling and rounding
-BigFixedArithmetic.Rational x = BigFixedArithmetic.Rational.of(-22, 7);
+Rational x = Rational.of(-22, 7);
 x.floor();                                           // -4
 x.ceil();                                            // -3
 x.round(RoundingMode.HALF_UP);                       // -3
 x.roundToDenominator(16, RoundingMode.HALF_UP);      // -25/8 (nearest sixteenth)
 
 // Cycle information
-BigFixedArithmetic.Rational seventh = BigFixedArithmetic.Rational.of(1, 7);
-seventh.periodLength();                              // 6
-BigFixedArithmetic.Rational.of(1, 12).preperiodLength();   // 2  (0.08(3))
+Rational.of(1, 7).periodLength();                    // 6
+Rational.of(1, 12).preperiodLength();                // 2  (0.08(3))
 
 // Any base
-BigFixedArithmetic.Rational.of(1, 10).toRadixString(2, -1, RoundingMode.HALF_UP);   // "0.0(0011)"
+Rational.of(1, 10).toRadixString(2, -1, RoundingMode.HALF_UP);   // "0.0(0011)"
 
 // Continued fractions and approximation
-BigFixedArithmetic.Rational r = BigFixedArithmetic.Rational.of(355, 113);
+Rational r = Rational.of(355, 113);
 r.toContinuedFractionString();                       // "[3; 7, 16]"
 r.convergents();                                     // [3, 22/7, 355/113]
-BigFixedArithmetic.Rational pi = BigFixedArithmetic.Rational.parse("3.14159265358979323846");
-pi.bestApproximation(1000);                          // 355/113
-BigFixedArithmetic.Rational.fromDecimal("0.142857"); // 1/7
+Rational.parse("3.14159265358979323846").bestApproximation(1000);   // 355/113
+Rational.fromDecimal("0.142857");                    // 1/7
 
 // Formatting
-BigFixedArithmetic.Rational.of(22, 7).toMixedString();     // "3 1/7"
-BigFixedArithmetic.Rational.of(4, 13).toEgyptianString();  // "1/4 + 1/18 + 1/468"
+Rational.of(22, 7).toMixedString();                  // "3 1/7"
+Rational.of(4, 13).toEgyptianString();               // "1/4 + 1/18 + 1/468"
 ```
+
+### Number conversions
+
+```java
+Number n = Rational.parse("7/2");
+n.intValue();                                        // 3
+n.doubleValue();                                     // 3.5
+Rational.parse("1/3").doubleValue();                 // 0.3333333333333333 (correctly rounded)
+BigFixedArithmetic.parseDecimal("-12.375").doubleValue();   // -12.375
+```
+
+`intValue()` and `longValue()` drop the fractional part and narrow like `BigInteger` does. `floatValue()` and `doubleValue()` are the nearest value, and become infinite or zero when the number is out of range.
+
+### Scientific and engineering notation
+
+```java
+Rational v = Rational.parse("12345.678");
+v.toScientificString(5, RoundingMode.HALF_UP);       // "1.2346E+4"
+v.toEngineeringString(5, RoundingMode.HALF_UP);      // "12.346E+3"
+Rational.parse("0.125").toScientificString();        // "1.25E-1"  (exact, fewest digits)
+Rational.parse("12500").toEngineeringString();       // "12.5E+3"
+BigFixedArithmetic.parseDecimal("12345.6").toEngineeringString();   // "12.3456E+3"
+```
+
+The digit-count versions always print exactly that many significant digits, trailing zeros included (`1/4` with 5 digits is `2.5000E-1`). The exact versions print the fewest digits that represent the value, and throw `ArithmeticException` if the decimal expansion doesn't terminate (use the digit-count version for those). Zero is `0E+0`.
+
+### Bounded precision
+
+A `Context` limits a result in the way `MathContext` limits a `BigDecimal`:
+
+```java
+Context.significantDigits(5)                    // 5 significant digits, HALF_UP
+Context.significantDigits(5, RoundingMode.DOWN)
+Context.decimalPlaces(2)                        // 2 places after the point
+Context.maxDenominator(100)                     // nearest fraction with denominator <= 100
+Context.UNLIMITED                               // no limit, results stay exact
+```
+
+Pass one to the arithmetic methods, or call `ctx.apply(x)` on any value:
+
+```java
+Rational.of(22, 7).add(Rational.of(1, 3), Context.significantDigits(5));   // 3.4762
+Rational.of(22, 7).multiply(Rational.of(1, 3), Context.decimalPlaces(2));  // 1.05
+Rational.of(2).pow(10, Context.significantDigits(2));                      // 1000
+Rational.of(1, 3).roundToSignificantDigits(3, RoundingMode.HALF_UP);       // 0.333
+Rational.of(1, 3).roundToDecimalPlaces(4, RoundingMode.HALF_UP);           // 0.3333
+```
+
+This is what keeps iterative calculations small. Newton's method for the square root of 2 with exact fractions roughly doubles the size of the fraction every step; with `Context.significantDigits(30)` after each operation it stays at a fixed size.
+
+### Square roots, nth roots and powers
+
+```java
+Rational.parse("9/4").sqrt();                              // 3/2 (exact; throws if the root is irrational)
+Rational two = Rational.of(2);
+two.sqrt(Context.significantDigits(20));                   // 1.4142135623730950488
+two.sqrt(Context.maxDenominator(100));                     // 140/99
+two.root(3, Context.significantDigits(10));                // 1.25992105 (cube root)
+Rational.of(-8).root(3, Context.UNLIMITED);                // -2 (odd roots of negatives are real)
+
+// Powers with integer or fractional exponents
+Rational.of(8).pow(Rational.parse("2/3"));                 // 4
+Rational.of(1, 4).pow(Rational.parse("-1/2"));             // 2
+two.pow(Rational.parse("1/2"), Context.significantDigits(10));   // 1.414213562
+Rational.of(-8).pow(Rational.parse("1/3"));                // -2
+```
+
+Roots and fractional powers are **correctly rounded**: the result is the true value rounded as the context says, never an approximation that is rounded a second time. A rational result (such as `3/2` for `9/4`) is returned exactly and then limited by the context. If the true result is irrational and the context is `UNLIMITED`, an `ArithmeticException` is thrown, because no finite fraction is exact.
+
+`hasRationalRoot(n)` tells you in advance whether the nth root is rational.
 
 ### API summary
 
@@ -150,18 +255,23 @@ BigFixedArithmetic.Rational.of(4, 13).toEgyptianString();  // "1/4 + 1/18 + 1/46
 | `longDivide(BigInteger, BigInteger)` | Integer quotient of two non-negative values |
 | `divideToString(dividend, divisor, places, mode[, base])` | Quotient as text |
 | `streamDivide(dividend, divisor, places[, mode])` | Prints the quotient and a newline |
-| `parseDecimal(String)` / `parseInteger(String)` | Exact string parsing |
+| `parseDecimal(String)` / `parseInteger(String)` | Exact string parsing, scientific notation included |
+| `MAX_EXPONENT` | Largest accepted exponent (10,000) |
 
-**`Rational`**
+**`Rational`** (extends `Number`)
 
 | Group | Methods |
 |---|---|
 | Create | `of(n, d)`, `of(n)`, `of(Decimal)`, `parse(text)`, `parse(text, base)`, `fromDecimal(text[, tolerance])`, `fromContinuedFraction(...)` |
-| Arithmetic | `add`, `subtract`, `multiply`, `divide`, `pow`, `negate`, `abs`, `reciprocal`, `signum` |
+| Arithmetic | `add`, `subtract`, `multiply`, `divide` (each with an optional `Context`), `pow`, `negate`, `abs`, `reciprocal`, `signum` |
+| Roots and powers | `sqrt()`, `sqrt(ctx)`, `root(n, ctx)`, `pow(int[, ctx])`, `pow(Rational[, ctx])`, `hasRationalRoot(n)` |
+| Precision | `Context.significantDigits`, `Context.decimalPlaces`, `Context.maxDenominator`, `Context.UNLIMITED`, `ctx.apply(x)`, `roundToSignificantDigits`, `roundToDecimalPlaces` |
+| Number | `intValue`, `longValue`, `floatValue`, `doubleValue` |
 | Compare | `compareTo`, `equals`, `isInteger` |
 | Integer part | `floor`, `ceil`, `truncate`, `fractionalPart`, `round(mode)`, `roundToDenominator(n, mode)` |
 | Cycles | `preperiodLength([base])`, `periodLength([base])` |
 | Expansion | `toRadixString(base, places, mode)`, `toDecimalString(places, mode)`, `toRepeatingString()` |
+| Scientific | `toScientificString([digits, mode])`, `toEngineeringString([digits, mode])` |
 | Continued fractions | `continuedFraction()`, `toContinuedFractionString()`, `convergents()` |
 | Approximation | `bestApproximation(maxDenominator)`, `approximate(x, tolerance)` |
 | Formatting | `toString()`, `toMixedString()`, `egyptianFractions()`, `toEgyptianString()` |
@@ -177,25 +287,34 @@ Supported rounding modes are `UP`, `DOWN`, `CEILING`, `FLOOR`, `HALF_UP`, `HALF_
 
 ### Accepted input formats
 
-`parseDecimal` and `parseInteger` accept an optional `+` or `-`, digits, and at most one decimal point, with at least one digit overall: `42`, `-0.5`, `+3.14`, `.25`, `7.`. Surrounding whitespace is ignored.
+`parseDecimal` and `parseInteger` accept an optional `+` or `-`, digits, at most one decimal point, and an optional exponent (`e` or `E`, an optional sign, then digits), with at least one digit in the number: `42`, `-0.5`, `+3.14`, `.25`, `7.`, `1.5e3`, `2E-4`. Surrounding whitespace is ignored.
 
-`Rational.parse` also accepts a repeating block in parentheses after the decimal point (`0.(3)`, `12.34(56)`), fractions (`22/7`, `1.5/0.25`, with a repeating decimal allowed on either side), and mixed numbers (`3 1/7`, where the sign applies to the whole number). Fractions with a zero denominator throw `ArithmeticException`; anything else malformed throws `IllegalArgumentException`. Scientific notation (`1e5`) is not supported.
+`Rational.parse` accepts the same, plus a repeating block in parentheses after the decimal point (`0.(3)`, `12.34(56)`, with an exponent allowed afterwards), fractions (`22/7`, `1.5/0.25`, `1e3/4`, with a repeating decimal allowed on either side), and mixed numbers (`3 1/7`, where the sign applies to the whole number; exponents are not allowed in mixed numbers). Fractions with a zero denominator throw `ArithmeticException`; anything else malformed throws `IllegalArgumentException`.
+
+An exponent may not be larger than `MAX_EXPONENT` (10,000) in either direction, because numbers are held as complete integers and `1e100000` would need 100,000 digits. In bases other than 10, `e` is an ordinary digit and exponents are not available.
 
 ## How repeating decimals are detected
 
 The remainders in long division must eventually repeat. For a reduced fraction, the number of digits before the repeating block depends only on the factors the denominator shares with the base. In base 10 it is the larger of the powers of 2 and 5, and a repeating block exists only if other prime factors remain. The code works that length out first, prints `(` at the right digit, and prints `)` the first time the remainder returns to the value it had at the `(`. No digits are buffered and only one remainder is stored. `periodLength()` is the multiplicative order of the base modulo the leftover factor, found by stepping through the remainders.
+
+## How roots are rounded correctly
+
+For the nth root of `x` kept to `k` decimal places, `floor(root(x) * 10^k)` equals the integer nth root of `floor(x * 10^(n k))`, which Newton's method finds exactly with integers. The rounding decision then compares `x * 10^(n k)` with the exact half-way point `(s + 1/2)^n`, so the digits are never taken from an approximation of the root. For a denominator limit, the code walks the Stern-Brocot tree using exact comparisons of `(p/q)^n` with `x`, moving in whole runs found by binary search, until the two bracketing fractions are neighbours that no fraction of allowed size separates, and then picks the nearer one.
 
 ## Limitations
 
 - `longDivide` expects non-negative arguments. The division methods and `Rational` handle signs for you.
 - **Long repeating blocks.** Exact mode and `periodLength()` take as many steps as the period is long, and the period can be nearly as long as the divisor (for example 1 / 99999989). Both use constant memory, and exact mode streams digits the whole time.
 - **Egyptian fractions** use the greedy method. Denominators can grow extremely fast, so results for some fractions are enormous.
+- **Unbounded fractions grow.** Without a `Context`, repeated arithmetic on rationals can produce very large numerators and denominators. Use a `Context` in iterative calculations.
+- **Irrational results need a limit.** `sqrt`, `root` and fractional `pow` throw `ArithmeticException` under `Context.UNLIMITED` when the true result is irrational. Exponents with a numerator or denominator beyond about 2^30 are rejected, and large integer powers produce correspondingly large numbers.
+- **Number narrowing.** `intValue()` and `longValue()` wrap around for values that don't fit, as `BigInteger` does. `floatValue()` and `doubleValue()` give infinity or zero when out of range.
 - **Speed.** Multiplication and division are written out the long way (Russian Peasant and shift-and-subtract), so for very large numbers this is much slower than using `BigInteger` or `BigDecimal` directly. `Rational` uses these routines.
-- Exactness applies to rational arithmetic. Irrational values (square roots, trigonometric functions, pi) cannot be represented exactly in any finite number of digits.
+- Exactness applies to rational arithmetic. Irrational values (square roots, pi, and so on) can only be given to a stated precision.
 
 ## Testing
 
-The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling and all rounding modes, and separate brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches (which verify the smallest denominator and the closest distance). Parsing and printing were round-tripped in every base from 2 to 36. In total about 260,000 checks ran with no differences.
+The code was checked against independent references: `java.math.BigDecimal` for rounding, floor, ceiling, every rounding mode, square roots, scientific output and the conversion to `float` and `double` (including subnormals, ties and overflow); a separate BigDecimal Newton iteration for nth roots; and brute-force or map-based implementations for repeating expansions, cycle lengths, simplest-fraction and best-approximation searches, and the nearest fraction under a denominator limit. Parsing and printing were round-tripped in every base from 2 to 36 and through scientific notation. In total over 320,000 checks ran with no differences.
 
 ## License
 
