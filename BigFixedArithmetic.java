@@ -1,21 +1,36 @@
 import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.Scanner;
+import java.util.function.Consumer;
 
 /**
  * BigFixedArithmetic
- * 
+ *
  * Demonstrates exact, soft-emulated integer arithmetic using BigInteger.
  * Implements addition, subtraction, Russian Peasant multiplication, and a
- * streaming division engine that outputs digits sequentially without truncation.
+ * division engine that outputs digits sequentially.
  *
  * Numbers can be supplied as strings (see {@link #parseDecimal(String)}).  A
  * decimal such as "-12.375" is held exactly as an unscaled integer plus a scale
  * (-12375 and 3), so no precision is lost on input.
+ *
+ * Division has two modes:
+ * <ul>
+ *   <li><b>Exact (maxDecimalPlaces = -1):</b> the full result is produced, and a
+ *       repeating decimal is shown with its repeating block in parentheses,
+ *       e.g. 1/3 = 0.(3), 1/6 = 0.1(6), 22/7 = 3.(142857).  This mode always
+ *       terminates, and digits are emitted as they are computed.</li>
+ *   <li><b>Fixed places (maxDecimalPlaces &gt;= 0):</b> the result is rounded
+ *       to that many places using a {@link RoundingMode} (default HALF_UP).</li>
+ * </ul>
  */
 public class BigFixedArithmetic {
 
     private static final BigInteger ZERO = BigInteger.ZERO;
     private static final BigInteger ONE  = BigInteger.ONE;
+    private static final BigInteger FIVE = BigInteger.valueOf(5);
     private static final BigInteger TEN  = BigInteger.valueOf(10);
 
     // ── Addition & Subtraction ───────────────────────────────────────────────
@@ -207,15 +222,31 @@ public class BigFixedArithmetic {
     }
 
     /**
-     * Streams a / b for decimal operands.  Since
+     * Prints a / b for decimal operands, rounding with HALF_UP.  Since
      *   (ua / 10^sa) / (ub / 10^sb) = (ua * 10^sb) / (ub * 10^sa),
      * the quotient is reduced to an exact integer division and handed to
-     * {@link #streamDivide(BigInteger, BigInteger, long)}.
+     * {@link #streamDivide(BigInteger, BigInteger, long, RoundingMode)}.
      */
     public static void streamDivide(Decimal a, Decimal b, long maxDecimalPlaces) {
-        BigInteger numerator   = multiply(a.unscaled, pow10(b.scale));
-        BigInteger denominator = multiply(b.unscaled, pow10(a.scale));
-        streamDivide(numerator, denominator, maxDecimalPlaces);
+        streamDivide(a, b, maxDecimalPlaces, RoundingMode.HALF_UP);
+    }
+
+    /** Prints a / b for decimal operands with the given rounding mode. */
+    public static void streamDivide(Decimal a, Decimal b, long maxDecimalPlaces, RoundingMode mode) {
+        streamDivide(divisionNumerator(a, b), divisionDenominator(a, b), maxDecimalPlaces, mode);
+    }
+
+    /** Returns a / b for decimal operands as a string (see {@link #divideToString}). */
+    public static String divideToString(Decimal a, Decimal b, long maxDecimalPlaces, RoundingMode mode) {
+        return divideToString(divisionNumerator(a, b), divisionDenominator(a, b), maxDecimalPlaces, mode);
+    }
+
+    private static BigInteger divisionNumerator(Decimal a, Decimal b) {
+        return multiply(a.unscaled, pow10(b.scale));
+    }
+
+    private static BigInteger divisionDenominator(Decimal a, Decimal b) {
+        return multiply(b.unscaled, pow10(a.scale));
     }
 
     // ── Division & Helpers ───────────────────────────────────────────────────
@@ -253,60 +284,186 @@ public class BigFixedArithmetic {
     }
 
     /**
-     * Divides {@code dividend} by {@code divisor} and continuously outputs decimal digits.
-     * 
+     * Prints dividend / divisor followed by a newline, rounding with HALF_UP.
+     *
      * @param dividend numerator
      * @param divisor denominator
-     * @param maxDecimalPlaces number of fractional digits to print, or -1 for unlimited streaming
+     * @param maxDecimalPlaces number of fractional digits (the result is rounded to
+     *        this many places), or -1 for the exact result with any repeating
+     *        block shown in parentheses
      */
     public static void streamDivide(BigInteger dividend, BigInteger divisor, long maxDecimalPlaces) {
+        streamDivide(dividend, divisor, maxDecimalPlaces, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * Prints dividend / divisor followed by a newline.
+     *
+     * In exact mode (-1) digits are printed as they are computed.  In
+     * fixed-places mode the result is rounded with {@code mode} and printed
+     * once; a result that divides out exactly in fewer places is printed
+     * without padding zeros (24.75, not 24.750000).
+     *
+     * @throws ArithmeticException on division by zero, or if {@code mode} is
+     *         UNNECESSARY and the result needs rounding
+     */
+    public static void streamDivide(BigInteger dividend, BigInteger divisor,
+                                    long maxDecimalPlaces, RoundingMode mode) {
+        divideInto(System.out::print, dividend, divisor, maxDecimalPlaces, mode);
+        System.out.println();
+    }
+
+    /** Same as {@link #streamDivide(BigInteger, BigInteger, long, RoundingMode)} but returns the text. */
+    public static String divideToString(BigInteger dividend, BigInteger divisor,
+                                        long maxDecimalPlaces, RoundingMode mode) {
+        StringBuilder sb = new StringBuilder();
+        divideInto(s -> sb.append(s), dividend, divisor, maxDecimalPlaces, mode);
+        return sb.toString();
+    }
+
+    private static void divideInto(Consumer<String> out, BigInteger dividend, BigInteger divisor,
+                                   long maxDecimalPlaces, RoundingMode mode) {
+        Objects.requireNonNull(mode, "mode");
         if (divisor.equals(ZERO)) {
             throw new ArithmeticException("Division by zero");
+        }
+        if (maxDecimalPlaces < -1) {
+            throw new IllegalArgumentException("maxDecimalPlaces must be -1 (exact) or >= 0");
         }
 
         boolean isNegative = (dividend.signum() < 0) ^ (divisor.signum() < 0);
         BigInteger rem = dividend.abs();
         BigInteger den = divisor.abs();
 
-        if (isNegative && !rem.equals(ZERO)) {
-            System.out.print("-");
-        }
-
-        // 1. Integer Part via Binary Long Division
+        // Integer part via binary long division, then the remainder below the divisor
         BigInteger integerPart = longDivide(rem, den);
-        System.out.print(integerPart);
-
-        // Update remainder: rem = rem - (integerPart * den)
         rem = rem.subtract(multiply(integerPart, den));
 
-        if (rem.equals(ZERO) || maxDecimalPlaces == 0) {
-            System.out.println();
+        if (maxDecimalPlaces < 0) {
+            exactDigits(out, isNegative && !dividend.equals(ZERO), integerPart, rem, den);
+        } else {
+            roundedDigits(out, isNegative, integerPart, rem, den, maxDecimalPlaces, mode);
+        }
+    }
+
+    /**
+     * Exact mode.  Emits every digit as it is computed and marks the repeating block.
+     *
+     * The remainders of long division eventually cycle.  For the reduced fraction
+     * rem/den, the digits before the cycle number max(twos, fives), where those are
+     * the powers of 2 and 5 in the reduced denominator, and the cycle is present
+     * only if other prime factors remain.  So "(" can be printed at the right moment
+     * without buffering, and the cycle ends the first time the remainder returns to
+     * the value it had when "(" was printed.  Memory use is constant.
+     */
+    private static void exactDigits(Consumer<String> out, boolean negative,
+                                    BigInteger integerPart, BigInteger rem, BigInteger den) {
+        if (negative) {
+            out.accept("-");
+        }
+        out.accept(integerPart.toString());
+        if (rem.equals(ZERO)) {
             return;
         }
+        out.accept(".");
 
-        // 2. Continuous Fractional Digit Generator
-        System.out.print(".");
-        long digitsOutput = 0;
-
-        while (!rem.equals(ZERO)) {
-            if (maxDecimalPlaces >= 0 && digitsOutput >= maxDecimalPlaces) {
+        // Reduce rem/den and count the factors of 2 and 5 in the denominator
+        BigInteger reduced = longDivide(den, rem.gcd(den));
+        long twos = 0;
+        long fives = 0;
+        while (!reduced.testBit(0)) {
+            reduced = reduced.shiftRight(1);
+            twos++;
+        }
+        while (true) {
+            BigInteger q = longDivide(reduced, FIVE);
+            if (!multiply(q, FIVE).equals(reduced)) {
                 break;
+            }
+            reduced = q;
+            fives++;
+        }
+        boolean repeating = !reduced.equals(ONE);
+        long preLength = Math.max(twos, fives);
+
+        BigInteger cycleStart = null;
+        long printed = 0;
+        while (true) {
+            if (repeating && printed == preLength) {
+                out.accept("(");
+                cycleStart = rem;
+            }
+            if (!repeating && rem.equals(ZERO)) {
+                break;                                   // terminating decimal
             }
 
             // Bring down next decimal digit: rem = rem * 10
             rem = multiply(rem, TEN);
-
-            // Determine next single digit using binary long division
             BigInteger digit = longDivide(rem, den);
-            System.out.print(digit);
-
-            // Update remainder: rem = rem - (digit * den)
+            out.accept(digit.toString());
             rem = rem.subtract(multiply(digit, den));
+            printed++;
 
-            digitsOutput++;
+            if (cycleStart != null && rem.equals(cycleStart)) {
+                out.accept(")");
+                break;
+            }
+        }
+    }
+
+    /**
+     * Fixed-places mode.  Generates up to maxDecimalPlaces digits (stopping early
+     * if the division comes out exact), then rounds using the leftover remainder.
+     */
+    private static void roundedDigits(Consumer<String> out, boolean negative,
+                                      BigInteger integerPart, BigInteger rem, BigInteger den,
+                                      long maxDecimalPlaces, RoundingMode mode) {
+        BigInteger scaled = integerPart;     // value * 10^places, truncated
+        long places = 0;
+        while (!rem.equals(ZERO) && places < maxDecimalPlaces) {
+            rem = multiply(rem, TEN);
+            BigInteger digit = longDivide(rem, den);
+            rem = rem.subtract(multiply(digit, den));
+            scaled = add(multiply(scaled, TEN), digit);
+            places++;
         }
 
-        System.out.println();
+        if (!rem.equals(ZERO) && roundsUp(mode, negative, scaled, rem, den)) {
+            scaled = scaled.add(ONE);
+        }
+
+        String digits = scaled.toString();
+        int p = (int) places;
+        if (p > 0) {
+            StringBuilder sb = new StringBuilder(digits);
+            while (sb.length() <= p) {
+                sb.insert(0, '0');
+            }
+            sb.insert(sb.length() - p, '.');
+            digits = sb.toString();
+        }
+        out.accept((negative && !scaled.equals(ZERO) ? "-" : "") + digits);
+    }
+
+    /**
+     * Decides whether the magnitude is bumped up by one unit in the last place.
+     * {@code rem}/{@code den} is the unused fraction (0 &lt; rem &lt; den) and
+     * {@code scaled} is the truncated magnitude.
+     */
+    private static boolean roundsUp(RoundingMode mode, boolean negative,
+                                    BigInteger scaled, BigInteger rem, BigInteger den) {
+        switch (mode) {
+            case UP:          return true;
+            case DOWN:        return false;
+            case CEILING:     return !negative;
+            case FLOOR:       return negative;
+            case UNNECESSARY: throw new ArithmeticException("Rounding necessary");
+            default:
+                int half = add(rem, rem).compareTo(den);     // compares 2*rem with den
+                if (mode == RoundingMode.HALF_UP)   return half >= 0;
+                if (mode == RoundingMode.HALF_DOWN) return half > 0;
+                return half > 0 || (half == 0 && scaled.testBit(0));   // HALF_EVEN
+        }
     }
 
     // ── Interactive Program Entry Point ──────────────────────────────────────
@@ -336,14 +493,30 @@ public class BigFixedArithmetic {
         System.out.println("Subtraction (a - b)    : " + subtract(a, b));
         System.out.println("Multiplication (a * b) : " + multiply(a, b));
 
-        System.out.println("\n--- Streaming Division ---");
-        System.out.print("Enter required decimal places (-1 for unlimited streaming): ");
+        System.out.println("\n--- Division ---");
+        System.out.print("Enter required decimal places (-1 for exact, repeating blocks shown like 0.(3)): ");
         long precision = scanner.nextLong();
+
+        RoundingMode mode = RoundingMode.HALF_UP;
+        if (precision >= 0) {
+            scanner.nextLine();      // rest of the line after the number
+            System.out.print("Rounding mode (HALF_UP, HALF_EVEN, HALF_DOWN, UP, DOWN, CEILING, FLOOR) [HALF_UP]: ");
+            String choice = scanner.hasNextLine() ? scanner.nextLine().trim() : "";
+            if (!choice.isEmpty()) {
+                try {
+                    mode = RoundingMode.valueOf(choice.toUpperCase(Locale.ROOT));
+                } catch (IllegalArgumentException e) {
+                    System.out.println("Unknown rounding mode: " + choice);
+                    scanner.close();
+                    return;
+                }
+            }
+        }
 
         System.out.print("Division Result (a / b): ");
         try {
-            streamDivide(a, b, precision);
-        } catch (ArithmeticException e) {
+            streamDivide(a, b, precision, mode);
+        } catch (ArithmeticException | IllegalArgumentException e) {
             System.out.println();
             System.out.println("Error: " + e.getMessage());
         }
