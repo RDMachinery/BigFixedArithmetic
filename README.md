@@ -1,3 +1,5 @@
+![Splash](splash.jpeg)
+
 # BigFixedArithmetic
 
 Exact arithmetic in a single Java file, built on `BigInteger`. It parses numbers from strings (including scientific notation) without losing a digit, divides exactly (repeating decimals are detected and shown as `0.(3)`), and includes a `Rational` fraction type, a `Number` subclass, with features `BigDecimal` doesn't have: repeating-decimal parsing, cycle analysis, expansion in any base, continued fractions, best approximations, correctly rounded square roots, nth roots and fractional powers, and bounded-precision contexts that stop fractions growing without limit.
